@@ -62,9 +62,10 @@ fn deploy_init_binary(path: &Path) -> Result<CleanupGuard> {
 }
 
 
-fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path) -> Result<()> {
+fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) -> Result<()> {
+  let quiet = if verbosity < 2 { "quiet" } else { "" };
   let cmdline = format!(
-    "earlycon=uart,io,0x3f8 reboot=k panic=5 loglevel=0 console=hvc0 rootfstype=virtiofs rw init={}",
+    "earlycon=uart,io,0x3f8 reboot=k panic=5 console=hvc0 rootfstype=virtiofs rw init={} {quiet}",
     init_guest_path.display()
   );
   let c_kernel_path = CString::new(kernel.into_os_string().into_vec())?;
@@ -121,6 +122,7 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     kernel,
     cpus,
     memory,
+    verbosity,
   } = args;
 
   let ctx = krun::krun_create_ctx() as u32;
@@ -133,7 +135,17 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
 
   // Add a serial console so `earlycon=uart,io,0x3f8` works.
   // SAFETY: `ctx` is a valid krun context.
-  let rc = unsafe { krun::krun_add_serial_console_default(ctx, -1, libc::STDERR_FILENO) };
+  let rc = unsafe {
+    krun::krun_add_serial_console_default(
+      ctx,
+      -1,
+      if verbosity > 0 {
+        libc::STDERR_FILENO
+      } else {
+        -1
+      },
+    )
+  };
   ensure!(rc >= 0, "failed to add serial console");
 
   // Disable TSI (Transparent Socket Impersonation) by explicitly
@@ -149,7 +161,7 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
   let rc = krun::krun_add_vsock(ctx, 0);
   ensure!(rc >= 0, "failed to add vsock device");
 
-  let () = set_kernel(ctx, kernel, init_guest_path)?;
+  let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
 
   let c_rootfs = c"/";
   // SAFETY: `ctx` is a valid krun context and `c_rootfs` is a valid
