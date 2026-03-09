@@ -1,0 +1,81 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Build with only line information enabled to decrease compilation
+  # time and binary sizes in CI. This option is assumed to only have
+  # marginal effects on the generated code, likely only in terms of
+  # section arrangement. See
+  # https://doc.rust-lang.org/rustc/codegen-options/index.html#debuginfo
+  RUSTFLAGS: '-D warnings -C debuginfo=line-tables-only'
+
+jobs:
+  build-linux-kernel:
+    uses: ./.github/workflows/build-linux.yml
+    secrets: inherit
+    with:
+      rev: 'v6.18'
+      config: 'var/linux-config-minimal'
+  build:
+    name: Build [${{ matrix.profile }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        rust: [stable]
+        profile: [dev, release]
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ matrix.rust }}
+    - name: Build
+      run: cargo build --profile=${{ matrix.profile }}
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: [build-linux-kernel]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo chmod 666 /dev/kvm
+      - name: Test
+        env:
+          ARTIFACT_URL: ${{ needs.build-linux-kernel.outputs.kernel-artifact-url }}
+        run: |
+          # Download artifact in parallel with test compilation. The unzip
+          # will produce the kernel bzImage.
+          (curl --location \
+            --fail-with-body \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}"\
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output artifact.zip \
+            "${ARTIFACT_URL}" && unzip artifact.zip) &
+          artifact_pid=$!
+
+          cargo test --workspace --all-features --no-run
+          wait $artifact_pid
+
+          VMSH_KERNEL="bzImage" cargo test --workspace --all-features -- --include-ignored
+  clippy:
+    name: Lint with clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo clippy --no-deps --workspace --all-targets --all-features --tests -- -A unknown_lints -A deprecated
+  rustdoc:
+    name: Generate documentation
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: '-D warnings'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo doc --workspace --no-deps --document-private-items
