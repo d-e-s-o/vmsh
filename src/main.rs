@@ -3,6 +3,7 @@
 mod args;
 
 use std::env::temp_dir;
+use std::ffi::c_char;
 use std::ffi::CString;
 use std::fs::remove_file;
 use std::fs::write;
@@ -89,7 +90,7 @@ fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) 
 }
 
 
-fn set_exec(ctx: u32) -> Result<()> {
+fn set_exec(ctx: u32, command: Vec<String>) -> Result<()> {
   let hostname = c"HOSTNAME=krun-boot";
   let home = c"HOME=/root";
 
@@ -113,6 +114,29 @@ fn set_exec(ctx: u32) -> Result<()> {
   //         NUL-terminated pointer array.
   let rc = unsafe { krun::krun_set_env(ctx, env_ptrs.as_ptr()) };
   ensure!(rc >= 0, "failed to set environment");
+
+  if !command.is_empty() {
+    let cmd = CString::new(command[0].as_str())?;
+    let args = command[1..]
+      .iter()
+      .map(|a| CString::new(a.as_str()))
+      .collect::<Result<Vec<_>, _>>()?;
+    let mut argv = args
+      .iter()
+      .map(|a| a.as_ptr())
+      .collect::<Vec<*const c_char>>();
+    let () = argv.push(ptr::null());
+
+    // SAFETY: `ctx` is a valid krun context and all pointers reference
+    //         valid NUL-terminated strings or null sentinels.
+    let rc = unsafe { krun::krun_set_exec(ctx, cmd.as_ptr(), argv.as_ptr(), env_ptrs.as_ptr()) };
+    ensure!(rc >= 0, "failed to set exec command");
+  } else {
+    // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
+    //         NUL-terminated pointer array.
+    let rc = unsafe { krun::krun_set_env(ctx, env_ptrs.as_ptr()) };
+    ensure!(rc >= 0, "failed to set environment");
+  }
   Ok(())
 }
 
@@ -122,6 +146,7 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     kernel,
     cpus,
     memory,
+    command,
     verbosity,
   } = args;
 
@@ -169,7 +194,7 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
   let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
   ensure!(rc >= 0, "failed to set root filesystem");
 
-  let () = set_exec(ctx)?;
+  let () = set_exec(ctx, command)?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");

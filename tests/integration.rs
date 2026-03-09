@@ -2,6 +2,7 @@
 
 use std::env;
 use std::io::Write as _;
+use std::process::Child;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
@@ -30,6 +31,22 @@ fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
         .write_all(shell_input.as_bytes())?;
       child.wait_with_output()
     })
+    .expect("failed to run vmsh")
+}
+
+
+/// Run a command inside the VM (via `-- cmd args...`), returning the captured `Output`.
+fn run_command(cmd: &[&str]) -> Output {
+  let kernel = env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set");
+  Command::new(env!("CARGO_BIN_EXE_vmsh"))
+    .arg(&kernel)
+    .arg("--")
+    .args(cmd)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .and_then(Child::wait_with_output)
     .expect("failed to run vmsh")
 }
 
@@ -131,5 +148,76 @@ fn very_verbose_more_output() {
     "-vv should produce more stderr than -v ({} vs {} bytes)",
     v2.stderr.len(),
     v1.stderr.len(),
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn command_exit_success() {
+  let output = run_command(&["/bin/true"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn command_exit_failure() {
+  let output = run_command(&["/bin/sh", "-c", "exit 42"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(42),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn command_stdout() {
+  let output = run_command(&["/bin/echo", "hello"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "hello\n",
+    "stdout should be 'hello\\n', got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn command_stderr() {
+  let output = run_command(&["/bin/sh", "-c", "echo err >&2"]);
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    stderr, "err\n",
+    "stderr should be 'err\\n', got: {stderr:?}",
+  );
+  assert!(stdout.is_empty(), "stdout should be empty, got: {stdout:?}");
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn command_with_arguments() {
+  let output = run_command(&["/bin/echo", "foo", "bar", "baz"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "foo bar baz\n",
+    "stdout should be 'foo bar baz\\n', got: {stdout:?}",
   );
 }
