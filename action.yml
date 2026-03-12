@@ -1,0 +1,41 @@
+name: Setup vmsh
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Determine source hash
+      id: source-hash
+      shell: bash
+      run: |
+        hash=$(find "${{ github.action_path }}/src" \
+                     "${{ github.action_path }}/Cargo.toml" \
+                     -type f -exec sha256sum {} + | sort | sha256sum | cut -d' ' -f1)
+        echo "hash=${hash}" >> "$GITHUB_OUTPUT"
+    - name: Restore cached vmsh binary
+      id: cache
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.vmsh/bin
+        key: vmsh-${{ steps.source-hash.outputs.hash }}
+    - name: Build vmsh
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cargo build \
+          --release \
+          --manifest-path "${{ github.action_path }}/Cargo.toml" \
+          --target-dir "${{ runner.temp }}/vmsh-target"
+        mkdir -p ~/.vmsh/bin
+        cp "${{ runner.temp }}/vmsh-target/release/vmsh" ~/.vmsh/bin/
+    - name: Save cached vmsh binary
+      if: steps.cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.vmsh/bin
+        key: vmsh-${{ steps.source-hash.outputs.hash }}
+    - name: Add vmsh to PATH
+      shell: bash
+      run: echo "${HOME}/.vmsh/bin" >> "$GITHUB_PATH"
+    - name: Enable KVM access
+      shell: bash
+      run: sudo chmod 666 /dev/kvm
