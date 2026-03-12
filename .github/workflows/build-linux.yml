@@ -51,7 +51,7 @@ jobs:
           fi
           echo "targets=${targets}" >> $GITHUB_OUTPUT
       - uses: actions/checkout@v6
-      - uses: actions/cache/restore@v4
+      - uses: actions/cache/restore@v5
         id: restore-cached-kernel
         with:
           path: build/
@@ -102,7 +102,7 @@ jobs:
           cp "${KBUILD_OUTPUT}/arch/x86/boot/bzImage" "${build}/bzImage"
           popd
       - if: steps.restore-cached-kernel.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: build/
           key: linux-kernel-${{ github.workflow_sha }}-${{ inputs.rev }}-${{ hashFiles(inputs.config) }}
