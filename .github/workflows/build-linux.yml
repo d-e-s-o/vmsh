@@ -106,7 +106,7 @@ jobs:
         with:
           path: build/
           key: linux-kernel-${{ github.workflow_sha }}-${{ inputs.rev }}-${{ hashFiles(inputs.config) }}
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         id: upload-linux-kernel
         # TODO: Having a single path/name may be problematic should we
         #       ever opt to reusing this workflow multiple times with
