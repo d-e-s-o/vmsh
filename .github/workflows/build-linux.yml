@@ -105,7 +105,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: build/
-          key: linux-kernel-${{ github.workflow_sha }}-${{ inputs.rev }}-${{ hashFiles(inputs.config) }}
+          key: linux-kernel-${{ inputs.rev }}-${{ hashFiles(inputs.config) }}
       - uses: actions/upload-artifact@v7
         id: upload-linux-kernel
         # TODO: Having a single path/name may be problematic should we
