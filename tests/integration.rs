@@ -40,14 +40,25 @@ fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
 
 /// Run a command inside the VM (via `-- cmd args...`), returning the captured `Output`.
 fn run_command(cmd: &[&str]) -> Output {
+  run_command_with_env(cmd, &[], &[])
+}
+
+/// Run a command inside the VM with extra CLI args and environment variables set on the host process.
+fn run_command_with_env(cmd: &[&str], extra_args: &[&str], env_vars: &[(&str, &str)]) -> Output {
   let kernel = env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set");
-  Command::new(env!("CARGO_BIN_EXE_vmsh"))
+  let mut command = Command::new(env!("CARGO_BIN_EXE_vmsh"));
+  command
+    .args(extra_args)
     .arg(&kernel)
     .arg("--")
     .args(cmd)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
+    .stderr(Stdio::piped());
+  for &(key, value) in env_vars {
+    command.env(key, value);
+  }
+  command
     .spawn()
     .and_then(Child::wait_with_output)
     .expect("failed to run vmsh")
@@ -354,5 +365,85 @@ fn loopback_device() {
   assert!(
     stdout.trim() == "up" || stdout.trim() == "unknown",
     "loopback should be 'up' or 'unknown', got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn env_passthrough() {
+  let output = run_command_with_env(
+    &["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"],
+    &["--all-envs"],
+    &[("__VMSH_TEST_MARKER", "hello_from_host")],
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "hello_from_host\n",
+    "host env var should be visible in guest, got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn env_explicit_value() {
+  let output = run_command_with_env(&["/bin/sh", "-c", "echo $FOO"], &["--env=FOO=bar"], &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "bar\n",
+    "explicit --env=FOO=bar should be visible in guest, got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn env_passthrough_specific() {
+  let output = run_command_with_env(
+    &["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"],
+    &["--env=__VMSH_TEST_MARKER"],
+    &[("__VMSH_TEST_MARKER", "specific_value")],
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "specific_value\n",
+    "--env=KEY should forward the host value, got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn env_override_with_all_envs() {
+  let output = run_command_with_env(
+    &["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"],
+    &["--all-envs", "--env=__VMSH_TEST_MARKER=overridden"],
+    &[("__VMSH_TEST_MARKER", "original")],
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "overridden\n",
+    "--env should override --all-envs, got: {stdout:?}",
   );
 }

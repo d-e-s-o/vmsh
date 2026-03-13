@@ -2,12 +2,20 @@
 
 mod args;
 
+use std::cell::LazyCell;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::env;
 use std::env::temp_dir;
 use std::ffi::c_char;
 use std::ffi::CString;
+use std::ffi::OsStr;
+use std::ffi::OsString;
+use std::fs;
 use std::fs::remove_file;
 use std::fs::write;
 use std::mem::MaybeUninit;
+use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::ffi::OsStringExt as _;
 use std::path::Path;
@@ -31,8 +39,17 @@ const INIT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmsh-init")
 const KRUN_KERNEL_FORMAT_BZIMAGE: u32 = 6;
 
 
-/// RAII guard to clean up the init binary on exit.
+/// RAII guard to clean up a temporary file on exit.
 struct CleanupGuard(Option<PathBuf>);
+
+impl Deref for CleanupGuard {
+  type Target = Path;
+
+  fn deref(&self) -> &Self::Target {
+    // SANITY: We only ever unset `0` as part of the `Drop` impl.
+    self.0.as_deref().unwrap()
+  }
+}
 
 impl Drop for CleanupGuard {
   fn drop(&mut self) {
@@ -63,6 +80,74 @@ fn deploy_init_binary(path: &Path) -> Result<CleanupGuard> {
 }
 
 
+/// Build the content of the environment file from CLI flags and host
+/// env.
+///
+/// Variables that are reserved or overridden by vmsh (`VMSH_*`) or
+/// internal to libkrun (`KRUN_*`) are excluded when `all_envs` is set.
+fn build_env_content(
+  env_args: &[String],
+  all_envs: bool,
+  host_env: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<u8> {
+  let host = LazyCell::new(|| host_env.into_iter().collect::<HashMap<_, _>>());
+  let mut out = BTreeMap::new();
+
+  if all_envs {
+    for (key, value) in &*host {
+      if let Some(k) = key.to_str() {
+        if k.starts_with("VMSH_") || k.starts_with("KRUN_") {
+          continue;
+        }
+      }
+      let _prev = out.insert(key.as_os_str(), value.as_os_str());
+    }
+  }
+
+  for arg in env_args {
+    if let Some(pos) = arg.find('=') {
+      let key = OsStr::new(&arg[..pos]);
+      let value = OsStr::new(&arg[pos + 1..]);
+      let _prev = out.insert(key, value);
+    } else {
+      let key = OsStr::new(arg);
+      if let Some(value) = host.get(key) {
+        let _prev = out.insert(key, value);
+      }
+    }
+  }
+
+  let mut buf = Vec::new();
+  for (key, value) in &out {
+    let () = buf.extend_from_slice(key.as_bytes());
+    let () = buf.push(b'=');
+    let () = buf.extend_from_slice(value.as_bytes());
+    let () = buf.push(b'\n');
+  }
+  buf
+}
+
+
+/// Write host environment variables to a file for the guest init to load.
+///
+/// Returns `None` when there are no variables to forward, skipping the
+/// file creation entirely.
+fn write_env_file(
+  path: &Path,
+  env_args: &[String],
+  all_envs: bool,
+) -> Result<Option<CleanupGuard>> {
+  let buf = build_env_content(env_args, all_envs, env::vars_os());
+  if buf.is_empty() {
+    return Ok(None);
+  }
+  let () = fs::write(path, &buf)
+    .with_context(|| format!("failed to write env file to `{}`", path.display()))?;
+  let guard = CleanupGuard(Some(path.to_path_buf()));
+  Ok(Some(guard))
+}
+
+
 fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) -> Result<()> {
   let quiet = if verbosity < 2 { "quiet" } else { "" };
   let cmdline = format!(
@@ -90,7 +175,9 @@ fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) 
 }
 
 
-fn set_exec(ctx: u32, command: Vec<String>) -> Result<()> {
+fn set_exec(ctx: u32, command: Vec<String>, env_file: Option<&Path>) -> Result<()> {
+  // Provide defaults for some relevant variables, but these will be
+  // overwritten by any user provided values (present in `env_file`).
   let hostname = c"HOSTNAME=krun-boot";
   let home = c"HOME=/root";
 
@@ -103,11 +190,19 @@ fn set_exec(ctx: u32, command: Vec<String>) -> Result<()> {
     + unsafe { (libc::isatty(libc::STDERR_FILENO) == 0) as u8 };
 
   let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr()];
+
+  let env_file_env;
+  if let Some(path) = env_file {
+    env_file_env = CString::new(format!("VMSH_ENV_FILE={}", path.display()))?;
+    let () = env_ptrs.push(env_file_env.as_ptr());
+  }
+
   let redirect_env;
   if redirect_count > 0 {
     redirect_env = CString::new(format!("VMSH_REDIRECT={redirect_count}"))?;
     let () = env_ptrs.push(redirect_env.as_ptr());
   }
+
   let () = env_ptrs.push(ptr::null());
 
   // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
@@ -147,6 +242,8 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     cpus,
     memory,
     command,
+    env_vars,
+    all_envs,
     verbosity,
   } = args;
 
@@ -194,7 +291,10 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
   let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
   ensure!(rc >= 0, "failed to set root filesystem");
 
-  let () = set_exec(ctx, command)?;
+  let env_path = temp_dir().join(format!("vmsh-env-{}", process::id()));
+  let _env_guard = write_env_file(&env_path, &env_vars, all_envs)?;
+  let env_file = _env_guard.as_deref();
+  let () = set_exec(ctx, command, env_file)?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");
@@ -242,4 +342,102 @@ fn main() -> Result<()> {
 
   let () = exec_vm(args, &init_path)?;
   Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+
+  fn host_env() -> Vec<(OsString, OsString)> {
+    vec![
+      (OsString::from("PATH"), OsString::from("/usr/bin")),
+      (OsString::from("USER"), OsString::from("alice")),
+      (OsString::from("HOSTNAME"), OsString::from("myhost")),
+      (OsString::from("HOME"), OsString::from("/home/alice")),
+      (OsString::from("VMSH_REDIRECT"), OsString::from("3")),
+      (
+        OsString::from("VMSH_KERNEL"),
+        OsString::from("/boot/vmlinuz"),
+      ),
+      (OsString::from("KRUN_LOG_LEVEL"), OsString::from("debug")),
+      (OsString::from("EDITOR"), OsString::from("vim")),
+    ]
+  }
+
+
+  #[test]
+  fn no_flags_empty_output() {
+    let all_envs = false;
+    let content = build_env_content(&[], all_envs, Vec::<(OsString, OsString)>::new());
+    assert!(content.is_empty());
+  }
+
+  #[test]
+  fn all_envs_exports_host() {
+    let all_envs = true;
+    let content = build_env_content(&[], all_envs, host_env());
+    let text = String::from_utf8(content).unwrap();
+    assert!(text.contains("PATH=/usr/bin\n"));
+    assert!(text.contains("USER=alice\n"));
+    assert!(text.contains("EDITOR=vim\n"));
+  }
+
+  #[test]
+  fn all_envs_skips_blocked() {
+    let all_envs = true;
+    let content = build_env_content(&[], all_envs, host_env());
+    let text = String::from_utf8(content).unwrap();
+    assert!(text.contains("HOSTNAME=myhost\n"));
+    assert!(text.contains("HOME=/home/alice\n"));
+    assert!(!text.contains("VMSH_REDIRECT="));
+    assert!(!text.contains("VMSH_KERNEL="));
+    assert!(!text.contains("KRUN_LOG_LEVEL="));
+  }
+
+  #[test]
+  fn env_key_resolves_from_host() {
+    let all_envs = false;
+    let content = build_env_content(&["PATH".to_string()], all_envs, host_env());
+    let text = String::from_utf8(content).unwrap();
+    assert_eq!(text, "PATH=/usr/bin\n");
+  }
+
+  #[test]
+  fn env_key_value_explicit() {
+    let all_envs = false;
+    let content = build_env_content(
+      &["FOO=bar".to_string()],
+      all_envs,
+      Vec::<(OsString, OsString)>::new(),
+    );
+    let text = String::from_utf8(content).unwrap();
+    assert_eq!(text, "FOO=bar\n");
+  }
+
+  #[test]
+  fn env_key_missing_skipped() {
+    let all_envs = false;
+    let content = build_env_content(&["NONEXISTENT".to_string()], all_envs, host_env());
+    assert!(content.is_empty());
+  }
+
+  #[test]
+  fn env_overrides_all_envs() {
+    let all_envs = true;
+    let content = build_env_content(&["PATH=custom".to_string()], all_envs, host_env());
+    let text = String::from_utf8(content).unwrap();
+    assert!(text.contains("PATH=custom\n"));
+    assert!(!text.contains("PATH=/usr/bin\n"));
+  }
+
+  #[test]
+  fn no_duplicates() {
+    let all_envs = true;
+    let content = build_env_content(&["PATH".to_string()], all_envs, host_env());
+    let text = String::from_utf8(content).unwrap();
+    let count = text.matches("PATH=").count();
+    assert_eq!(count, 1);
+  }
 }

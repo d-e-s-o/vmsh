@@ -19,6 +19,18 @@ pub struct Args {
   /// Command and arguments to run inside the VM (after --).
   #[clap(last = true)]
   pub command: Vec<String>,
+  /// Pass a host environment variable to the guest.
+  ///
+  /// Use `--env=KEY` to forward the current value or `--env=KEY=VALUE`
+  /// to set an explicit value. Can be specified multiple times.
+  #[clap(long = "env")]
+  pub env_vars: Vec<String>,
+  /// Forward all host environment variables to the guest.
+  ///
+  /// Variables that conflict with vmsh internals (`VMSH_*`) or libkrun
+  /// (`KRUN_*`) are excluded. Individual `--env` flags take precedence.
+  #[clap(long)]
+  pub all_envs: bool,
   /// Increase verbosity (can be supplied multiple times).
   #[clap(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
   pub verbosity: u8,

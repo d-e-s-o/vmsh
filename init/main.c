@@ -145,6 +145,45 @@ static void bring_up_loopback(void) {
   close(sockfd);
 }
 
+/* Load environment variables from a file written by the host.
+ *
+ * The kernel command line has a limited number of env var slots
+ * (CONFIG_INIT_ENV_ARG_LIMIT, typically 32), so we pass bulk env vars
+ * through a file on the virtiofs-shared filesystem instead.
+ *
+ * The file format is one KEY=VALUE per line (newline-delimited, no
+ * quoting). Lines without '=' or empty lines are skipped.
+ */
+static void load_env_file(void) {
+  const char *path = getenv("VMSH_ENV_FILE");
+  if (!path)
+    return;
+
+  FILE *f = fopen(path, "r");
+  if (!f)
+    return;
+
+  /* Remove the file now that we have it open. */
+  unlink(path);
+
+  char *line = NULL;
+  size_t cap = 0;
+  ssize_t len;
+  while ((len = getline(&line, &cap, f)) > 0) {
+    /* Strip trailing newline. */
+    if (len > 0 && line[len - 1] == '\n')
+      line[--len] = '\0';
+    if (len == 0)
+      continue;
+    /* putenv needs a persistent copy; it does NOT copy the string. */
+    char *entry = strdup(line);
+    if (entry)
+      putenv(entry);
+  }
+  free(line);
+  fclose(f);
+}
+
 static void set_exit_code(int code) {
   struct statfs buf;
 
@@ -297,6 +336,9 @@ int main(int argc, char *argv[]) {
 
   /* Bring up loopback interface. */
   bring_up_loopback();
+
+  /* Load host environment variables from the shared filesystem. */
+  load_env_file();
 
   /* Set hostname. */
   const char *hostname = getenv("HOSTNAME");
