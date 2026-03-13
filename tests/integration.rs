@@ -251,3 +251,108 @@ fn guest_sees_host_filesystem() {
     "guest should see host file contents, got: {stdout:?}",
   );
 }
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn guest_writes_to_host_filesystem() {
+  let dir = env::temp_dir().join(format!("vmsh-write-test-{}", process::id()));
+  let () = fs::create_dir_all(&dir).expect("failed to create temp dir on host");
+
+  let file_path = dir.join("output.txt");
+  let file_path_str = file_path.to_str().unwrap();
+  let content = "written_by_guest";
+
+  let output = run_command(&[
+    "/bin/sh",
+    "-c",
+    &format!("echo -n {content} > {file_path_str}"),
+  ]);
+
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+
+  let host_content =
+    fs::read_to_string(&file_path).expect("file written by guest should exist on host");
+  assert_eq!(
+    host_content, content,
+    "host file should contain guest-written content, got: {host_content:?}",
+  );
+
+  let () = fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn working_directory() {
+  let output = run_command(&["/bin/pwd"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "/",
+    "guest working directory should be /, got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn proc_mount() {
+  let output = run_command(&["/bin/cat", "/proc/self/comm"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "/proc/self/comm should be readable; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "cat",
+    "/proc/self/comm should report 'cat', got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn dev_null_availability() {
+  // `/dev/null` works
+  let output = run_command(&["/bin/sh", "-c", "echo gone > /dev/null && echo ok"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "/dev/null redirect should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "ok",
+    "/dev/null redirect should work, got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn loopback_device() {
+  let output = run_command(&["/bin/cat", "/sys/class/net/lo/operstate"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "loopback operstate should be readable; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(
+    stdout.trim() == "up" || stdout.trim() == "unknown",
+    "loopback should be 'up' or 'unknown', got: {stdout:?}",
+  );
+}
