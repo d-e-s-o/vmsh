@@ -4,6 +4,7 @@ use std::env;
 use std::fs;
 use std::fs::remove_file;
 use std::io::Write as _;
+use std::os::unix::process::ExitStatusExt as _;
 use std::process;
 use std::process::Child;
 use std::process::Command;
@@ -334,6 +335,20 @@ fn working_directory() {
 }
 
 /// Verify that `/proc` is mounted and functional in the guest.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn signal_exit_code() {
+  let output = run_command(&["/bin/sh", "-c", "kill -9 $$"]);
+  let status = output.status;
+  assert_eq!(
+    status.code(),
+    Some(137),
+    "process killed by SIGKILL should exit with 128+9=137, got: {:?}",
+    status.code(),
+  );
+  assert_eq!(status.signal(), Some(9));
+}
+
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn proc_mount() {
