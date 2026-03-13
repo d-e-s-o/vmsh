@@ -59,6 +59,30 @@ static void mount_or_warn(const char *source, const char *target,
   }
 }
 
+static int kernel_supports_fs(const char *fstype) {
+  FILE *f = fopen("/proc/filesystems", "r");
+  if (!f)
+    return 0;
+
+  char line[256];
+  while (fgets(line, sizeof(line), f)) {
+    /* Each line is either "nodev\t<fstype>\n" or "\t<fstype>\n". */
+    char *name = strchr(line, '\t');
+    if (!name)
+      continue;
+    name++; /* skip the tab */
+    size_t len = strlen(name);
+    if (len > 0 && name[len - 1] == '\n')
+      name[len - 1] = '\0';
+    if (strcmp(name, fstype) == 0) {
+      fclose(f);
+      return 1;
+    }
+  }
+  fclose(f);
+  return 0;
+}
+
 static int mount_filesystems(void) {
   /* Create level-1 directories. */
   mkdir_p("/dev");
@@ -73,6 +97,18 @@ static int mount_filesystems(void) {
   if (mount_or_err("sysfs", "/sys", "sysfs",
                    MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME) < 0)
     return -1;
+
+  if (kernel_supports_fs("debugfs")) {
+    mkdir_p("/sys/kernel/debug");
+    mount_or_warn("debugfs", "/sys/kernel/debug", "debugfs",
+                  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "debugfs");
+  }
+
+  if (kernel_supports_fs("tracefs")) {
+    mkdir_p("/sys/kernel/tracing");
+    mount_or_warn("tracefs", "/sys/kernel/tracing", "tracefs",
+                  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "tracefs");
+  }
 
   mkdir_p("/sys/fs/cgroup");
   mount_or_warn("cgroup2", "/sys/fs/cgroup", "cgroup2",
