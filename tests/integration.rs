@@ -1,7 +1,10 @@
 //! Integration tests for `vmsh`.
 
 use std::env;
+use std::fs;
+use std::fs::remove_file;
 use std::io::Write as _;
+use std::process;
 use std::process::Child;
 use std::process::Command;
 use std::process::Output;
@@ -219,5 +222,32 @@ fn command_with_arguments() {
   assert_eq!(
     stdout, "foo bar baz\n",
     "stdout should be 'foo bar baz\\n', got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn guest_sees_host_filesystem() {
+  // Create a temporary file on the host with unique content.
+  let marker = format!("vmsh-test-{}", process::id());
+  let path = env::temp_dir().join(&marker);
+  let () = fs::write(&path, &marker).expect("failed to create temp file on host");
+
+  // Read that file from inside the guest via the virtiofs-shared root.
+  let path_str = path.to_str().unwrap();
+  let output = run_command(&["/bin/cat", path_str]);
+
+  let () = drop(remove_file(&path));
+
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, marker,
+    "guest should see host file contents, got: {stdout:?}",
   );
 }
