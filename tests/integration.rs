@@ -284,6 +284,26 @@ fn guest_sees_host_filesystem() {
 /// Test that files written by the guest appear on the host.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn env_passthrough() {
+  let output = run_command_with_env(
+    &["/bin/sh", "-c", "echo $VMSH_TEST_MARKER"],
+    &[("VMSH_TEST_MARKER", "hello_from_host")],
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "hello_from_host\n",
+    "host env var should be visible in guest, got: {stdout:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn guest_writes_to_host_filesystem() {
   let dir = env::temp_dir().join(format!("vmsh-write-test-{}", process::id()));
   let () = fs::create_dir_all(&dir).expect("failed to create temp dir on host");
