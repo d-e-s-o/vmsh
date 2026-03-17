@@ -356,3 +356,22 @@ fn loopback_device() {
     "loopback should be 'up' or 'unknown', got: {stdout:?}",
   );
 }
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn host_home_inherited() {
+  let host_home = env::var("HOME").expect("HOME should be set on the host");
+  let output = run_command(&["/bin/sh", "-c", "echo $HOME"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    host_home,
+    "guest HOME should match host HOME, got: {stdout:?}",
+  );
+}

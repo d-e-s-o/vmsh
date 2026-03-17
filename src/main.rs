@@ -2,9 +2,11 @@
 
 mod args;
 
+use std::env;
 use std::env::temp_dir;
 use std::ffi::c_char;
 use std::ffi::CString;
+use std::ffi::OsString;
 use std::fs::remove_file;
 use std::fs::write;
 use std::mem::MaybeUninit;
@@ -92,7 +94,6 @@ fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) 
 
 fn set_exec(ctx: u32, command: Vec<String>) -> Result<()> {
   let hostname = c"HOSTNAME=krun-boot";
-  let home = c"HOME=/root";
 
   // Count how many of stdin/stdout/stderr are non-terminal. `libkrun`
   // creates virtio console ports for redirected FDs; let the guest init
@@ -102,12 +103,22 @@ fn set_exec(ctx: u32, command: Vec<String>) -> Result<()> {
     + unsafe { (libc::isatty(libc::STDOUT_FILENO) == 0) as u8 }
     + unsafe { (libc::isatty(libc::STDERR_FILENO) == 0) as u8 };
 
-  let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr()];
+  let mut env_ptrs = vec![hostname.as_ptr()];
+
   let redirect_env;
   if redirect_count > 0 {
     redirect_env = CString::new(format!("VMSH_REDIRECT={redirect_count}"))?;
     let () = env_ptrs.push(redirect_env.as_ptr());
   }
+
+  let home_env;
+  if let Some(path) = env::var_os("HOME") {
+    let mut path_var = OsString::from("HOME=");
+    let () = path_var.push(&path);
+    home_env = CString::new(path_var.into_vec())?;
+    let () = env_ptrs.push(home_env.as_ptr());
+  }
+
   let () = env_ptrs.push(ptr::null());
 
   // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
