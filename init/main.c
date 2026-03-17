@@ -110,6 +110,12 @@ static int mount_filesystems(void) {
                   MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "tracefs");
   }
 
+  if (kernel_supports_fs("bpf")) {
+    mkdir_p("/sys/fs/bpf");
+    mount_or_warn("bpffs", "/sys/fs/bpf", "bpf",
+                  MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "bpffs");
+  }
+
   mkdir_p("/sys/fs/cgroup");
   mount_or_warn("cgroup2", "/sys/fs/cgroup", "cgroup2",
                 MS_NODEV | MS_NOEXEC | MS_NOSUID | MS_RELATIME, "cgroup2");
