@@ -375,3 +375,22 @@ fn host_home_inherited() {
     "guest HOME should match host HOME, got: {stdout:?}",
   );
 }
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn host_path_inherited() {
+  let host_path = env::var("PATH").expect("PATH should be set on the host");
+  let output = run_command(&["/bin/sh", "-c", "echo $PATH"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    host_path,
+    "guest PATH should match host PATH, got: {stdout:?}",
+  );
+}

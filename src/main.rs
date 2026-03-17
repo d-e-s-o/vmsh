@@ -119,6 +119,14 @@ fn set_exec(ctx: u32, command: Vec<String>) -> Result<()> {
     let () = env_ptrs.push(home_env.as_ptr());
   }
 
+  let path_env;
+  if let Some(path) = env::var_os("PATH") {
+    let mut path_var = OsString::from("PATH=");
+    let () = path_var.push(&path);
+    path_env = CString::new(path_var.into_vec())?;
+    let () = env_ptrs.push(path_env.as_ptr());
+  }
+
   let () = env_ptrs.push(ptr::null());
 
   // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
