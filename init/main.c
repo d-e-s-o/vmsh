@@ -376,8 +376,22 @@ int main(int argc, char *argv[]) {
   /*
    * Build argv: krun_init plus any remaining args.
    * argv[0] = krun_init, argv[1..] = our argv[1..], NULL-terminated.
+   *
+   * Filter out `tsi_hijack` and `tsi_hijack_unix` arguments. These are
+   * kernel command line parameters for TSI (Transparent Socket
+   * Impersonation). When the kernel lacks TSI patches it passes them
+   * through to init as regular arguments.
    */
-  int exec_argc = 1 + (argc - 1);
+  int tsi_warning = 0;
+  int exec_argc = 1;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "tsi_hijack") == 0 ||
+        strcmp(argv[i], "tsi_hijack_unix") == 0) {
+      tsi_warning = 1;
+      continue;
+    }
+    exec_argc++;
+  }
   char **exec_argv = malloc((exec_argc + 1) * sizeof(char *));
   if (!exec_argv) {
     fprintf(stderr, "vmsh-init: malloc failed\n");
@@ -385,14 +399,23 @@ int main(int argc, char *argv[]) {
     return 125;
   }
   exec_argv[0] = (char *)krun_init;
-  for (int i = 1; i < argc; i++)
-    exec_argv[i] = argv[i];
-  exec_argv[exec_argc] = NULL;
+  int j = 1;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "tsi_hijack") == 0 ||
+        strcmp(argv[i], "tsi_hijack_unix") == 0)
+      continue;
+    exec_argv[j++] = argv[i];
+  }
+  exec_argv[j] = NULL;
 
   /* Check if we should run directly as PID 1 (no fork). */
   const char *init_pid1 = getenv("KRUN_INIT_PID1");
   if (init_pid1 && strcmp(init_pid1, "1") == 0) {
     setup_redirects();
+    if (tsi_warning)
+      fprintf(stderr,
+              "vmsh-init: warning: kernel does not support TSI networking; "
+              "use a TSI-patched kernel or omit --net argument to vmsh\n");
     do_exec(krun_init, exec_argv);
   }
 
@@ -407,6 +430,10 @@ int main(int argc, char *argv[]) {
   if (child_pid == 0) {
     /* Child process. */
     setup_redirects();
+    if (tsi_warning)
+      fprintf(stderr,
+              "vmsh-init: warning: kernel does not support TSI networking; "
+              "use a TSI-patched kernel or omit --net argument to vmsh\n");
     do_exec(krun_init, exec_argv);
   }
 

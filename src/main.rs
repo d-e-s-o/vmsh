@@ -241,6 +241,8 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     kernel,
     cpus,
     memory,
+    net,
+    uds,
     command,
     env_vars,
     all_envs,
@@ -283,17 +285,25 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
   };
   ensure!(rc >= 0, "failed to add serial console");
 
-  // Disable TSI (Transparent Socket Impersonation) by explicitly
-  // configuring vsock with no TSI flags. Without this, libkrun's
-  // implicit vsock adds `tsi_hijack` to the kernel command line, the
-  // handling of which requires custom kernel patches. Without said
-  // patches, the kernel passes through the argument to init as an
-  // unknown parameter.
-  // TODO: Networking support will likely need to add vsock support
-  //       back.
+  // Enable TSI (Transparent Socket Impersonation) for networking. TSI
+  // intercepts AF_INET/AF_INET6 socket calls in the guest kernel and
+  // proxies them through the host VMM via virtio-vsock, providing
+  // network connectivity without a virtual NIC. This requires a guest
+  // kernel with TSI patches applied (see `var/linux-tsi-patches/`).
+  const KRUN_TSI_HIJACK_INET: u32 = 1 << 0;
+  const KRUN_TSI_HIJACK_UNIX: u32 = 1 << 1;
+
   let rc = krun::krun_disable_implicit_vsock(ctx);
   ensure!(rc >= 0, "failed to disable implicit vsock");
-  let rc = krun::krun_add_vsock(ctx, 0);
+
+  let mut tsi_features = 0;
+  if net {
+    tsi_features |= KRUN_TSI_HIJACK_INET;
+  }
+  if net || uds {
+    tsi_features |= KRUN_TSI_HIJACK_UNIX;
+  }
+  let rc = krun::krun_add_vsock(ctx, tsi_features);
   ensure!(rc >= 0, "failed to add vsock device");
 
   let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
