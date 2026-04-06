@@ -2,7 +2,10 @@
 
 use std::env;
 use std::fs;
+use std::io::Read as _;
 use std::io::Write as _;
+use std::net::TcpListener;
+use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process;
@@ -10,6 +13,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
+use std::thread::spawn;
 
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
@@ -646,5 +650,95 @@ fn boot_zstd_kernel() {
     output.status.code(),
     Some(0),
     "unexpected exit code for zstd kernel; stderr:\n{stderr}",
+  );
+}
+
+/// Verify that TCP connections through TSI require `--net`.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn network_tcp_connection() {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind TCP listener");
+  let port = listener.local_addr().unwrap().port();
+
+  // Without --net, TCP connect should fail.
+  let py = format!(
+    "import socket; s=socket.socket(); s.settimeout(2); \
+     s.connect(('127.0.0.1',{port})); s.send(b'vmsh-tsi-test'); s.close()"
+  );
+  let output = run_command(&["/usr/bin/python3", "-c", &py]);
+  assert_ne!(
+    output.status.code(),
+    Some(0),
+    "TCP connect should fail without --net",
+  );
+
+  // With --net, TCP connect should succeed.
+  let handle = spawn(move || {
+    listener.set_nonblocking(false).unwrap();
+    let (mut conn, _addr) = listener.accept().expect("accept failed");
+    let mut buf = [0u8; 256];
+    let n = conn.read(&mut buf).expect("read failed");
+    String::from_utf8_lossy(&buf[..n]).to_string()
+  });
+
+  let output = run_command_with_env(&["/usr/bin/python3", "-c", &py], &["--net"], &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "guest TCP connect should succeed with --net; stderr:\n{stderr}",
+  );
+
+  let received = handle.join().expect("server thread panicked");
+  assert_eq!(
+    received, "vmsh-tsi-test",
+    "host should receive data sent from guest via TSI, got: {received:?}",
+  );
+}
+
+/// Verify that UNIX domain socket connections through TSI require
+/// `--uds`.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn uds_connection() {
+  let dir = TempDir::new().expect("failed to create temp dir");
+  let sock_path = dir.path().join("test.sock");
+  let sock_path_str = sock_path.to_str().unwrap().to_string();
+
+  let listener = UnixListener::bind(&sock_path).expect("failed to bind unix socket");
+
+  let py = format!(
+    "import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); \
+     s.connect('{sock_path_str}'); s.send(b'vmsh-uds-test'); s.close()"
+  );
+
+  // Without --uds, UDS connect should fail.
+  let output = run_command(&["/usr/bin/python3", "-c", &py]);
+  assert_ne!(
+    output.status.code(),
+    Some(0),
+    "UDS connect should fail without --uds",
+  );
+
+  // With --uds, UDS connect should succeed.
+  let handle = spawn(move || {
+    let (mut conn, _addr) = listener.accept().expect("accept failed");
+    let mut buf = [0u8; 256];
+    let n = conn.read(&mut buf).expect("read failed");
+    String::from_utf8_lossy(&buf[..n]).to_string()
+  });
+
+  let output = run_command_with_env(&["/usr/bin/python3", "-c", &py], &["--uds"], &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "guest UDS connect should succeed with --uds; stderr:\n{stderr}",
+  );
+
+  let received = handle.join().expect("server thread panicked");
+  assert_eq!(
+    received, "vmsh-uds-test",
+    "host should receive data sent from guest via UDS TSI, got: {received:?}",
   );
 }
