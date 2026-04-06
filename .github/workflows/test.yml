@@ -22,12 +22,14 @@ jobs:
       kernel-artifact-url: ${{ steps.build.outputs.kernel-artifact-url }}
     steps:
       - uses: actions/checkout@v6
-      - uses: d-e-s-o/build-linux@866d4915febc54e8229b12d67b0e0fbe219f825f
+      - uses: d-e-s-o/build-linux@378b1f694538b77916e3aac59d6ab394ad7dfc58
         id: build
         with:
           rev: 'v6.18'
           config: 'var/linux-config-minimal'
           vmlinux: 'true'
+          patches: |
+            var/linux-patches/6.18-*
   build:
     name: Build [${{ matrix.profile }}]
     runs-on: ubuntu-latest
@@ -69,7 +71,7 @@ jobs:
           cargo test --workspace --all-features --no-run
           wait $artifact_pid
 
-          VMSH_KERNEL="boot/vmlinux-6.18.0" cargo test --workspace --all-features -- --include-ignored
+          VMSH_KERNEL="boot/vmlinux-6.18.0+" cargo test --workspace --all-features -- --include-ignored
   clippy:
     name: Lint with clippy
     runs-on: ubuntu-latest

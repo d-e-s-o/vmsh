@@ -50,6 +50,9 @@ top of basic ones such as `PROC_FS`, `SYSFS`, etc., of course):
   virtiofs
 - `CONFIG_SERIAL_8250`, `CONFIG_SERIAL_8250_CONSOLE` -- serial console
   output
+- `CONFIG_TSI`, `CONFIG_VSOCKETS`, `CONFIG_VIRTIO_VSOCKETS` --
+  networking support (note that additional [kernel
+  patches](var/linux-patches/) are required for these features)
 
 A ready-to-use minimal configuration is provided in
 [`linux-config-minimal`](var/linux-config-minimal).
