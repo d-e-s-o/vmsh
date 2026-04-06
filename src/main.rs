@@ -367,6 +367,8 @@ mod tests {
   }
 
 
+  /// Test that without environment variable related flags set,
+  /// [`build_env_content`] produces an empty env var file.
   #[test]
   fn no_flags_empty_output() {
     let all_envs = false;
@@ -374,6 +376,7 @@ mod tests {
     assert!(content.is_empty());
   }
 
+  /// Check that `all_envs` exports non-blocked host vars.
   #[test]
   fn all_envs_exports_host() {
     let all_envs = true;
@@ -384,6 +387,8 @@ mod tests {
     assert!(text.contains("EDITOR=vim\n"));
   }
 
+  /// Verify that `all_envs` excludes `VMSH_*` and `KRUN_*` prefixed
+  /// variables.
   #[test]
   fn all_envs_skips_blocked() {
     let all_envs = true;
@@ -396,6 +401,8 @@ mod tests {
     assert!(!text.contains("KRUN_LOG_LEVEL="));
   }
 
+  /// Test that `--env=KEY` resolves its value from the host
+  /// environment.
   #[test]
   fn env_key_resolves_from_host() {
     let all_envs = false;
@@ -404,6 +411,7 @@ mod tests {
     assert_eq!(text, "PATH=/usr/bin\n");
   }
 
+  /// Check that `--env=KEY=VALUE` uses the provided value.
   #[test]
   fn env_key_value_explicit() {
     let all_envs = false;
@@ -416,6 +424,8 @@ mod tests {
     assert_eq!(text, "FOO=bar\n");
   }
 
+  /// Verify that a bare key missing from the host env is silently
+  /// skipped.
   #[test]
   fn env_key_missing_skipped() {
     let all_envs = false;
@@ -423,6 +433,8 @@ mod tests {
     assert!(content.is_empty());
   }
 
+  /// Test that `--env=KEY=VALUE` overrides the same key from
+  /// `all_envs`.
   #[test]
   fn env_overrides_all_envs() {
     let all_envs = true;
@@ -432,6 +444,8 @@ mod tests {
     assert!(!text.contains("PATH=/usr/bin\n"));
   }
 
+  /// Check that a key in both `all_envs` and `--env` produces only one
+  /// entry.
   #[test]
   fn no_duplicates() {
     let all_envs = true;

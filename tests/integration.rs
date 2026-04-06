@@ -38,7 +38,8 @@ fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
 }
 
 
-/// Run a command inside the VM (via `-- cmd args...`), returning the captured `Output`.
+/// Run a command inside the VM (via `-- cmd args...`), returning the
+/// captured [`Output`].
 fn run_command(cmd: &[&str]) -> Output {
   run_command_with_env(cmd, &[], &[])
 }
@@ -65,6 +66,7 @@ fn run_command_with_env(cmd: &[&str], extra_args: &[&str], env_vars: &[(&str, &s
 }
 
 
+/// Test that a successful shell command exits with 0.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn exit_success() {
@@ -77,6 +79,7 @@ fn exit_success() {
   );
 }
 
+/// Check that a non-zero shell exit code is propagated.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn exit_failure() {
@@ -89,6 +92,7 @@ fn exit_failure() {
   );
 }
 
+/// Verify that guest stdout is forwarded to the host.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn stdout_capture() {
@@ -106,6 +110,7 @@ fn stdout_capture() {
   );
 }
 
+/// Test that guest stderr is captured separately from stdout.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn stderr_capture() {
@@ -119,6 +124,8 @@ fn stderr_capture() {
   assert!(stdout.is_empty(), "stdout should be empty, got: {stdout:?}",);
 }
 
+/// Check that `--verbose` emits boot messages on stderr without
+/// polluting stdout.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn verbose_boot_on_stderr() {
@@ -140,6 +147,7 @@ fn verbose_boot_on_stderr() {
   );
 }
 
+/// Verify that `-vv` produces more `stderr` output than `-v`.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn very_verbose_more_output() {
@@ -165,6 +173,7 @@ fn very_verbose_more_output() {
   );
 }
 
+/// Test that `-- /bin/true` produces exit code 0.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_exit_success() {
@@ -177,6 +186,7 @@ fn command_exit_success() {
   );
 }
 
+/// Check that a non-zero `--` command exit code is propagated.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_exit_failure() {
@@ -189,6 +199,7 @@ fn command_exit_failure() {
   );
 }
 
+/// Verify that `stdout` from a `--` command is captured.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_stdout() {
@@ -206,6 +217,8 @@ fn command_stdout() {
   );
 }
 
+/// Test that `stderr` from a `--` command is captured separately from
+/// `stdout`.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_stderr() {
@@ -219,6 +232,8 @@ fn command_stderr() {
   assert!(stdout.is_empty(), "stdout should be empty, got: {stdout:?}");
 }
 
+/// Check that multiple arguments after `--` are forwarded to the guest
+/// command.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_with_arguments() {
@@ -236,6 +251,8 @@ fn command_with_arguments() {
   );
 }
 
+/// Verify that the guest can read host files via the virtiofs-shared
+/// root.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn guest_sees_host_filesystem() {
@@ -263,6 +280,7 @@ fn guest_sees_host_filesystem() {
   );
 }
 
+/// Test that files written by the guest appear on the host.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn guest_writes_to_host_filesystem() {
@@ -296,6 +314,7 @@ fn guest_writes_to_host_filesystem() {
   let () = fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Check that the guest's working directory defaults to `/`.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn working_directory() {
@@ -314,6 +333,7 @@ fn working_directory() {
   );
 }
 
+/// Verify that `/proc` is mounted and functional in the guest.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn proc_mount() {
@@ -332,6 +352,7 @@ fn proc_mount() {
   );
 }
 
+/// Test that `/dev/null` is available in the guest.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn dev_null_availability() {
@@ -351,6 +372,8 @@ fn dev_null_availability() {
   );
 }
 
+/// Check that `/dev/std{in,out,err}` are symlinks to
+/// `/proc/self/fd/{0,1,2}`.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn dev_stdin_stdout_stderr_symlinks() {
@@ -375,6 +398,7 @@ fn dev_stdin_stdout_stderr_symlinks() {
   );
 }
 
+/// Verify that the loopback interface is up in the guest.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn loopback_device() {
@@ -392,6 +416,7 @@ fn loopback_device() {
   );
 }
 
+/// Test that `--all-envs` forwards host env vars to the guest.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_passthrough() {
@@ -413,6 +438,7 @@ fn env_passthrough() {
   );
 }
 
+/// Check that `--env=KEY=VALUE` sets an explicit env var in the guest.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_explicit_value() {
@@ -430,6 +456,8 @@ fn env_explicit_value() {
   );
 }
 
+/// Verify that `--env=KEY` forwards the host's value for that key into
+/// the guest.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_passthrough_specific() {
@@ -451,6 +479,8 @@ fn env_passthrough_specific() {
   );
 }
 
+/// Test that `--env=KEY=VALUE` overrides the same key from
+/// `--all-envs`.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_override_with_all_envs() {
