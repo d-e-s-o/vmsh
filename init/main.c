@@ -133,6 +133,9 @@ static int mount_filesystems(void) {
 
   /* Symlink /dev/fd -> /proc/self/fd (may fail if exists). */
   symlink("/proc/self/fd", "/dev/fd");
+  symlink("/proc/self/fd/0", "/dev/stdin");
+  symlink("/proc/self/fd/1", "/dev/stdout");
+  symlink("/proc/self/fd/2", "/dev/stderr");
 
   return 0;
 }

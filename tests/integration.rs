@@ -353,6 +353,30 @@ fn dev_null_availability() {
 
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn dev_stdin_stdout_stderr_symlinks() {
+  let output = run_command(&[
+    "/bin/sh",
+    "-c",
+    "test -L /dev/stdin && test -L /dev/stdout && test -L /dev/stderr \
+     && readlink /dev/stdin && readlink /dev/stdout && readlink /dev/stderr",
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "/dev/stdin, /dev/stdout, /dev/stderr should be symlinks; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let lines = stdout.trim().lines().collect::<Vec<&str>>();
+  assert_eq!(
+    lines,
+    &["/proc/self/fd/0", "/proc/self/fd/1", "/proc/self/fd/2"],
+    "symlinks should point to /proc/self/fd/{{0,1,2}}, got: {lines:?}",
+  );
+}
+
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn loopback_device() {
   let output = run_command(&["/bin/cat", "/sys/class/net/lo/operstate"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
