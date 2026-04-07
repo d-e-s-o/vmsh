@@ -247,6 +247,19 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     verbosity,
   } = args;
 
+  if verbosity > 0 {
+    // SAFETY: `STDERR_FILENO` is a valid file descriptor.
+    let rc = unsafe {
+      krun::krun_init_log(
+        libc::STDERR_FILENO,
+        u32::from(verbosity),
+        2, // KRUN_LOG_STYLE_NEVER
+        0, // use env
+      )
+    };
+    ensure!(rc >= 0, "failed to set log level");
+  }
+
   let ctx = krun::krun_create_ctx() as u32;
 
   let rc = krun::krun_set_vm_config(ctx, cpus, memory);
