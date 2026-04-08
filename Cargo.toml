@@ -25,6 +25,9 @@ clap = { version = "4", features = ["derive"] }
 libc = { version = "0.2" }
 libkrun = { git = "https://github.com/d-e-s-o/libkrun.git", rev = "6217fba7dc1e4847593d179973e32434f5ca844e" }
 
+[dev-dependencies]
+tempfile = { version = "3", default-features = false }
+
 [lints.rust]
 deprecated-safe = "warn"
 future-incompatible = "warn"

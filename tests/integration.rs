@@ -2,13 +2,15 @@
 
 use std::env;
 use std::fs;
-use std::fs::remove_file;
 use std::io::Write as _;
 use std::process;
 use std::process::Child;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
+
+use tempfile::NamedTempFile;
+use tempfile::TempDir;
 
 
 /// Run a shell snippet inside the VM, returning the captured `Output`.
@@ -258,14 +260,14 @@ fn command_with_arguments() {
 fn guest_sees_host_filesystem() {
   // Create a temporary file on the host with unique content.
   let marker = format!("vmsh-test-{}", process::id());
-  let path = env::temp_dir().join(&marker);
-  let () = fs::write(&path, &marker).expect("failed to create temp file on host");
+  let mut file = NamedTempFile::new().expect("failed to create temp file on host");
+  let () = file
+    .write_all(marker.as_bytes())
+    .expect("failed to write temp file on host");
 
   // Read that file from inside the guest via the virtiofs-shared root.
-  let path_str = path.to_str().unwrap();
+  let path_str = file.path().to_str().unwrap();
   let output = run_command(&["/bin/cat", path_str]);
-
-  let () = drop(remove_file(&path));
 
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
@@ -284,10 +286,9 @@ fn guest_sees_host_filesystem() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn guest_writes_to_host_filesystem() {
-  let dir = env::temp_dir().join(format!("vmsh-write-test-{}", process::id()));
-  let () = fs::create_dir_all(&dir).expect("failed to create temp dir on host");
+  let dir = TempDir::new().expect("failed to create temp dir on host");
 
-  let file_path = dir.join("output.txt");
+  let file_path = dir.path().join("output.txt");
   let file_path_str = file_path.to_str().unwrap();
   let content = "written_by_guest";
 
@@ -310,8 +311,6 @@ fn guest_writes_to_host_filesystem() {
     host_content, content,
     "host file should contain guest-written content, got: {host_content:?}",
   );
-
-  let () = fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Check that the guest's working directory defaults to `/`.
