@@ -1,6 +1,7 @@
 //! Transparently run a shell (or other binary) in a VM.
 
 mod args;
+mod util;
 
 use std::cell::LazyCell;
 use std::collections::BTreeMap;
@@ -30,13 +31,11 @@ use anyhow::Result;
 use clap::Parser;
 
 use crate::args::Args;
+use crate::util::detect_kernel_format;
 
 
 /// Embedded init binary.
 const INIT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmsh-init"));
-
-/// Kernel format constant for `bzImage` (matches `KRUN_KERNEL_FORMAT_BZIMAGE`).
-const KRUN_KERNEL_FORMAT_BZIMAGE: u32 = 6;
 
 
 /// RAII guard to clean up a temporary file on exit.
@@ -149,6 +148,7 @@ fn write_env_file(
 
 
 fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) -> Result<()> {
+  let kernel_format = detect_kernel_format(&kernel)?;
   let quiet = if verbosity < 2 { "quiet" } else { "" };
   let cmdline = format!(
     "earlycon=uart,io,0x3f8 reboot=k panic=5 console=hvc0 rootfstype=virtiofs rw init={} {quiet}",
@@ -165,7 +165,7 @@ fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) 
     krun::krun_set_kernel(
       ctx,
       c_kernel_path.as_ptr(),
-      KRUN_KERNEL_FORMAT_BZIMAGE,
+      kernel_format as u32,
       initramfs,
       c_cmdline.as_ptr(),
     )

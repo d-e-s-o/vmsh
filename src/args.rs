@@ -8,7 +8,9 @@ use clap::Parser;
 #[derive(Debug, Parser)]
 #[clap(version = env!("VERSION"))]
 pub struct Args {
-  /// Path to the kernel bzImage.
+  /// Path to the kernel vmlinux.
+  ///
+  /// The image can optionally be gzip, bzip, or zstd compressed.
   pub kernel: PathBuf,
   /// Number of vCPUs present in the VM.
   #[clap(long, default_value_t = 2)]

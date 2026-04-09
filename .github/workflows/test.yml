@@ -22,11 +22,12 @@ jobs:
       kernel-artifact-url: ${{ steps.build.outputs.kernel-artifact-url }}
     steps:
       - uses: actions/checkout@v6
-      - uses: d-e-s-o/build-linux@ec34a7ad2635733082b2bab63c62136a06d272e9
+      - uses: d-e-s-o/build-linux@866d4915febc54e8229b12d67b0e0fbe219f825f
         id: build
         with:
           rev: 'v6.18'
           config: 'var/linux-config-minimal'
+          vmlinux: 'true'
   build:
     name: Build [${{ matrix.profile }}]
     runs-on: ubuntu-latest
@@ -55,7 +56,7 @@ jobs:
           ARTIFACT_URL: ${{ needs.build-linux-kernel.outputs.kernel-artifact-url }}
         run: |
           # Download artifact in parallel with test compilation. The unzip
-          # will produce the kernel bzImage.
+          # will produce the kernel vmlinux.
           (curl --location \
             --fail-with-body \
             --header "Accept: application/vnd.github+json" \
@@ -68,7 +69,7 @@ jobs:
           cargo test --workspace --all-features --no-run
           wait $artifact_pid
 
-          VMSH_KERNEL="bzImage" cargo test --workspace --all-features -- --include-ignored
+          VMSH_KERNEL="boot/vmlinux-6.18.0" cargo test --workspace --all-features -- --include-ignored
   clippy:
     name: Lint with clippy
     runs-on: ubuntu-latest
