@@ -3,6 +3,8 @@
 use std::env;
 use std::fs;
 use std::io::Write as _;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process;
 use std::process::Child;
 use std::process::Command;
@@ -12,18 +14,14 @@ use std::process::Stdio;
 use tempfile::NamedTempFile;
 use tempfile::TempDir;
 
+use vmsh::KernelFormat;
 
-/// Run a shell snippet inside the VM, returning the captured `Output`.
-fn run(shell_input: &str) -> Output {
-  run_with_args(shell_input, &[])
-}
 
-/// Run a shell snippet inside the VM with extra CLI arguments.
-fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
-  let kernel = env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set");
+/// Run a shell snippet inside the VM using an explicit kernel path.
+fn run_with_kernel(kernel_path: &Path, shell_input: &str, extra_args: &[&str]) -> Output {
   Command::new(env!("CARGO_BIN_EXE_vmsh"))
     .args(extra_args)
-    .arg(&kernel)
+    .arg(kernel_path)
     .stdin(Stdio::piped())
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
@@ -37,6 +35,17 @@ fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
       child.wait_with_output()
     })
     .expect("failed to run vmsh")
+}
+
+/// Run a shell snippet inside the VM, returning the captured `Output`.
+fn run(shell_input: &str) -> Output {
+  run_with_args(shell_input, &[])
+}
+
+/// Run a shell snippet inside the VM with extra CLI arguments.
+fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
+  let kernel = env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set");
+  run_with_kernel(Path::new(&kernel), shell_input, extra_args)
 }
 
 
@@ -498,5 +507,144 @@ fn env_override_with_all_envs() {
   assert_eq!(
     stdout, "overridden\n",
     "--env should override --all-envs, got: {stdout:?}",
+  );
+}
+
+
+/// Check whether a host tool is available in `$PATH`.
+fn has_tool(name: &str) -> bool {
+  Command::new(name)
+    .arg("--version")
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status()
+    .is_ok()
+}
+
+
+/// Return the decompression command for a compressed kernel format.
+fn decompress_cmd(format: KernelFormat) -> (&'static str, &'static [&'static str]) {
+  match format {
+    KernelFormat::Gz => ("gzip", &["-d", "-c"]),
+    KernelFormat::Bz2 => ("bzip2", &["-d", "-c"]),
+    KernelFormat::Zstd => ("zstd", &["-d", "-c", "-q"]),
+    KernelFormat::Elf => unreachable!("ELF kernels do not need decompression"),
+  }
+}
+
+
+/// Get a raw ELF kernel, decompressing `VMSH_KERNEL` if necessary.
+///
+/// Returns the path and an optional temp file handle that keeps the
+/// decompressed file alive.
+fn ensure_elf_kernel() -> (PathBuf, Option<NamedTempFile>) {
+  let kernel_path = PathBuf::from(env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"));
+  let format = vmsh::detect_kernel_format(&kernel_path).expect("failed to detect kernel format");
+
+  if format == KernelFormat::Elf {
+    return (kernel_path, None);
+  }
+
+  let (tool, args) = decompress_cmd(format);
+  let output = Command::new(tool)
+    .args(args)
+    .arg(&kernel_path)
+    .stderr(Stdio::piped())
+    .output()
+    .unwrap_or_else(|e| panic!("failed to run {tool}: {e}"));
+  assert!(
+    output.status.success(),
+    "{tool} decompression failed: {}",
+    String::from_utf8_lossy(&output.stderr),
+  );
+
+  let mut tmp = NamedTempFile::new().expect("failed to create temp file");
+  let () = tmp
+    .write_all(&output.stdout)
+    .expect("failed to write decompressed kernel");
+  (tmp.path().to_path_buf(), Some(tmp))
+}
+
+
+/// Compress an ELF kernel using a host tool, returning a temp file with
+/// the compressed data.
+fn compress_kernel(tool: &str, args: &[&str]) -> NamedTempFile {
+  let (elf_path, _elf_guard) = ensure_elf_kernel();
+  let output = Command::new(tool)
+    .args(args)
+    .arg(&elf_path)
+    .stderr(Stdio::piped())
+    .output()
+    .unwrap_or_else(|e| panic!("failed to run {tool}: {e}"));
+  assert!(
+    output.status.success(),
+    "{tool} compression failed: {}",
+    String::from_utf8_lossy(&output.stderr),
+  );
+
+  let mut tmp = NamedTempFile::new().expect("failed to create temp file");
+  let () = tmp
+    .write_all(&output.stdout)
+    .expect("failed to write compressed kernel");
+  tmp
+}
+
+
+/// Test booting from a gzip-compressed kernel.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn boot_gz_kernel() {
+  if !has_tool("gzip") {
+    eprintln!("warning: gzip not found, skipping test");
+    return;
+  }
+  let compressed = compress_kernel("gzip", &["-c"]);
+  let output = run_with_kernel(compressed.path(), "true\n", &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code for gzip kernel; stderr:\n{stderr}",
+  );
+}
+
+/// Test booting from a bzip2-compressed kernel.
+#[expect(unreachable_code)]
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn boot_bz2_kernel() {
+  // TODO: `libkrun` has a bug where it cannot correctly detect bzip2
+  //       headers. Re-enable this test once the upstream fix landed.
+  return;
+
+  if !has_tool("bzip2") {
+    eprintln!("warning: bzip2 not found, skipping test");
+    return;
+  }
+  let compressed = compress_kernel("bzip2", &["-c"]);
+  let output = run_with_kernel(compressed.path(), "true\n", &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code for bzip2 kernel; stderr:\n{stderr}",
+  );
+}
+
+/// Test booting from a zstd-compressed kernel.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn boot_zstd_kernel() {
+  if !has_tool("zstd") {
+    eprintln!("warning: zstd not found, skipping test");
+    return;
+  }
+  let compressed = compress_kernel("zstd", &["-c", "-q"]);
+  let output = run_with_kernel(compressed.path(), "true\n", &[]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code for zstd kernel; stderr:\n{stderr}",
   );
 }

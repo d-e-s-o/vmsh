@@ -1,7 +1,6 @@
 //! Transparently run a shell (or other binary) in a VM.
 
 mod args;
-mod util;
 
 use std::cell::LazyCell;
 use std::collections::BTreeMap;
@@ -30,8 +29,9 @@ use anyhow::Result;
 
 use clap::Parser;
 
+use vmsh::detect_kernel_format;
+
 use crate::args::Args;
-use crate::util::detect_kernel_format;
 
 
 /// Embedded init binary.

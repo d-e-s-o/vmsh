@@ -16,6 +16,9 @@ codegen-units = 1
 incremental = false
 panic = "abort"
 
+[features]
+test = []
+
 [build-dependencies]
 grev = { version = "0.1.3" }
 
@@ -27,6 +30,7 @@ libkrun = { git = "https://github.com/d-e-s-o/libkrun.git", rev = "6217fba7dc1e4
 
 [dev-dependencies]
 tempfile = { version = "3", default-features = false }
+vmsh = { path = ".", features = ["test"] }
 
 [lints.rust]
 deprecated-safe = "warn"
