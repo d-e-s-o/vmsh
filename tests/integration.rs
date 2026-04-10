@@ -1,5 +1,6 @@
 //! Integration tests for `vmsh`.
 
+use std::borrow::Cow;
 use std::env;
 use std::fs;
 use std::io::Read as _;
@@ -21,63 +22,91 @@ use tempfile::TempDir;
 use vmsh::KernelFormat;
 
 
-/// Run a shell snippet inside the VM using an explicit kernel path.
-fn run_with_kernel(kernel_path: &Path, shell_input: &str, extra_args: &[&str]) -> Output {
-  Command::new(env!("CARGO_BIN_EXE_vmsh"))
-    .args(extra_args)
-    .arg(kernel_path)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .spawn()
-    .and_then(|mut child| {
-      child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(shell_input.as_bytes())?;
-      child.wait_with_output()
-    })
-    .expect("failed to run vmsh")
+/// Builder for running commands inside a VM.
+struct Vm {
+  kernel: Option<PathBuf>,
+  args: Vec<String>,
+  env_vars: Vec<(String, String)>,
 }
 
-/// Run a shell snippet inside the VM, returning the captured `Output`.
-fn run(shell_input: &str) -> Output {
-  run_with_args(shell_input, &[])
-}
-
-/// Run a shell snippet inside the VM with extra CLI arguments.
-fn run_with_args(shell_input: &str, extra_args: &[&str]) -> Output {
-  let kernel = env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set");
-  run_with_kernel(Path::new(&kernel), shell_input, extra_args)
-}
-
-
-/// Run a command inside the VM (via `-- cmd args...`), returning the
-/// captured [`Output`].
-fn run_command(cmd: &[&str]) -> Output {
-  run_command_with_env(cmd, &[], &[])
-}
-
-/// Run a command inside the VM with extra CLI args and environment variables set on the host process.
-fn run_command_with_env(cmd: &[&str], extra_args: &[&str], env_vars: &[(&str, &str)]) -> Output {
-  let kernel = env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set");
-  let mut command = Command::new(env!("CARGO_BIN_EXE_vmsh"));
-  command
-    .args(extra_args)
-    .arg(&kernel)
-    .arg("--")
-    .args(cmd)
-    .stdin(Stdio::piped())
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped());
-  for &(key, value) in env_vars {
-    command.env(key, value);
+impl Vm {
+  fn new() -> Self {
+    Self {
+      kernel: None,
+      args: Vec::new(),
+      env_vars: Vec::new(),
+    }
   }
-  command
-    .spawn()
-    .and_then(Child::wait_with_output)
-    .expect("failed to run vmsh")
+
+  fn kernel(mut self, path: &Path) -> Self {
+    self.kernel = Some(path.to_path_buf());
+    self
+  }
+
+  fn arg(mut self, arg: &str) -> Self {
+    self.args.push(arg.to_string());
+    self
+  }
+
+  fn env(mut self, key: &str, value: &str) -> Self {
+    self.env_vars.push((key.to_string(), value.to_string()));
+    self
+  }
+
+  fn kernel_path(&self) -> Cow<'_, Path> {
+    self
+      .kernel
+      .as_deref()
+      .map(Cow::Borrowed)
+      .unwrap_or_else(|| {
+        Cow::Owned(PathBuf::from(
+          env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"),
+        ))
+      })
+  }
+
+  fn apply_env(&self, cmd: &mut Command) {
+    for (key, value) in &self.env_vars {
+      cmd.env(key, value);
+    }
+  }
+
+  /// Run a shell snippet inside the VM via stdin.
+  fn run_shell(&self, input: &str) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vmsh"));
+    let () = self.apply_env(&mut cmd);
+
+    cmd
+      .args(&self.args)
+      .arg(self.kernel_path().as_os_str())
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .and_then(|mut child| {
+        child.stdin.take().unwrap().write_all(input.as_bytes())?;
+        child.wait_with_output()
+      })
+      .expect("failed to run vmsh")
+  }
+
+  /// Run a command inside the VM via `-- cmd args...`.
+  fn run(&self, args: &[&str]) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vmsh"));
+    let () = self.apply_env(&mut cmd);
+
+    cmd
+      .args(&self.args)
+      .arg(self.kernel_path().as_os_str())
+      .arg("--")
+      .args(args)
+      .stdin(Stdio::piped())
+      .stdout(Stdio::piped())
+      .stderr(Stdio::piped())
+      .spawn()
+      .and_then(Child::wait_with_output)
+      .expect("failed to run vmsh")
+  }
 }
 
 
@@ -85,7 +114,7 @@ fn run_command_with_env(cmd: &[&str], extra_args: &[&str], env_vars: &[(&str, &s
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn exit_success() {
-  let output = run("true\n");
+  let output = Vm::new().run_shell("true\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -98,7 +127,7 @@ fn exit_success() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn exit_failure() {
-  let output = run("exit 42\n");
+  let output = Vm::new().run_shell("exit 42\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -111,7 +140,7 @@ fn exit_failure() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn stdout_capture() {
-  let output = run("echo hello\n");
+  let output = Vm::new().run_shell("echo hello\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -129,7 +158,7 @@ fn stdout_capture() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn stderr_capture() {
-  let output = run("echo err >&2\n");
+  let output = Vm::new().run_shell("echo err >&2\n");
   let stdout = String::from_utf8_lossy(&output.stdout);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
@@ -144,7 +173,7 @@ fn stderr_capture() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn verbose_boot_on_stderr() {
-  let output = run_with_args("echo hello\n", &["--verbose"]);
+  let output = Vm::new().arg("--verbose").run_shell("echo hello\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -166,8 +195,8 @@ fn verbose_boot_on_stderr() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn very_verbose_more_output() {
-  let v1 = run_with_args("true\n", &["-v"]);
-  let v2 = run_with_args("true\n", &["-vv"]);
+  let v1 = Vm::new().arg("-v").run_shell("true\n");
+  let v2 = Vm::new().arg("-vv").run_shell("true\n");
   let v1_stderr = String::from_utf8_lossy(&v1.stderr);
   let v2_stderr = String::from_utf8_lossy(&v2.stderr);
   assert_eq!(
@@ -192,7 +221,7 @@ fn very_verbose_more_output() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_exit_success() {
-  let output = run_command(&["/bin/true"]);
+  let output = Vm::new().run(&["/bin/true"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -205,7 +234,7 @@ fn command_exit_success() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_exit_failure() {
-  let output = run_command(&["/bin/sh", "-c", "exit 42"]);
+  let output = Vm::new().run(&["/bin/sh", "-c", "exit 42"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -218,7 +247,7 @@ fn command_exit_failure() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_stdout() {
-  let output = run_command(&["/bin/echo", "hello"]);
+  let output = Vm::new().run(&["/bin/echo", "hello"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -237,7 +266,7 @@ fn command_stdout() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_stderr() {
-  let output = run_command(&["/bin/sh", "-c", "echo err >&2"]);
+  let output = Vm::new().run(&["/bin/sh", "-c", "echo err >&2"]);
   let stdout = String::from_utf8_lossy(&output.stdout);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
@@ -252,7 +281,7 @@ fn command_stderr() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn command_with_arguments() {
-  let output = run_command(&["/bin/echo", "foo", "bar", "baz"]);
+  let output = Vm::new().run(&["/bin/echo", "foo", "bar", "baz"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -280,7 +309,7 @@ fn guest_sees_host_filesystem() {
 
   // Read that file from inside the guest via the virtiofs-shared root.
   let path_str = file.path().to_str().unwrap();
-  let output = run_command(&["/bin/cat", path_str]);
+  let output = Vm::new().run(&["/bin/cat", path_str]);
 
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
@@ -305,7 +334,7 @@ fn guest_writes_to_host_filesystem() {
   let file_path_str = file_path.to_str().unwrap();
   let content = "written_by_guest";
 
-  let output = run_command(&[
+  let output = Vm::new().run(&[
     "/bin/sh",
     "-c",
     &format!("echo -n {content} > {file_path_str}"),
@@ -330,7 +359,7 @@ fn guest_writes_to_host_filesystem() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn working_directory() {
-  let output = run_command(&["/bin/pwd"]);
+  let output = Vm::new().run(&["/bin/pwd"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -349,7 +378,7 @@ fn working_directory() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn proc_mount() {
-  let output = run_command(&["/bin/cat", "/proc/self/comm"]);
+  let output = Vm::new().run(&["/bin/cat", "/proc/self/comm"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -369,7 +398,7 @@ fn proc_mount() {
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn dev_null_availability() {
   // `/dev/null` works
-  let output = run_command(&["/bin/sh", "-c", "echo gone > /dev/null && echo ok"]);
+  let output = Vm::new().run(&["/bin/sh", "-c", "echo gone > /dev/null && echo ok"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -389,7 +418,7 @@ fn dev_null_availability() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn dev_stdin_stdout_stderr_symlinks() {
-  let output = run_command(&[
+  let output = Vm::new().run(&[
     "/bin/sh",
     "-c",
     "test -L /dev/stdin && test -L /dev/stdout && test -L /dev/stderr \
@@ -414,7 +443,7 @@ fn dev_stdin_stdout_stderr_symlinks() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn loopback_device() {
-  let output = run_command(&["/bin/cat", "/sys/class/net/lo/operstate"]);
+  let output = Vm::new().run(&["/bin/cat", "/sys/class/net/lo/operstate"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -432,11 +461,10 @@ fn loopback_device() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_passthrough() {
-  let output = run_command_with_env(
-    &["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"],
-    &["--all-envs"],
-    &[("__VMSH_TEST_MARKER", "hello_from_host")],
-  );
+  let output = Vm::new()
+    .arg("--all-envs")
+    .env("__VMSH_TEST_MARKER", "hello_from_host")
+    .run(&["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -454,7 +482,9 @@ fn env_passthrough() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_explicit_value() {
-  let output = run_command_with_env(&["/bin/sh", "-c", "echo $FOO"], &["--env=FOO=bar"], &[]);
+  let output = Vm::new()
+    .arg("--env=FOO=bar")
+    .run(&["/bin/sh", "-c", "echo $FOO"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -473,11 +503,10 @@ fn env_explicit_value() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_passthrough_specific() {
-  let output = run_command_with_env(
-    &["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"],
-    &["--env=__VMSH_TEST_MARKER"],
-    &[("__VMSH_TEST_MARKER", "specific_value")],
-  );
+  let output = Vm::new()
+    .arg("--env=__VMSH_TEST_MARKER")
+    .env("__VMSH_TEST_MARKER", "specific_value")
+    .run(&["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -496,11 +525,11 @@ fn env_passthrough_specific() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn env_override_with_all_envs() {
-  let output = run_command_with_env(
-    &["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"],
-    &["--all-envs", "--env=__VMSH_TEST_MARKER=overridden"],
-    &[("__VMSH_TEST_MARKER", "original")],
-  );
+  let output = Vm::new()
+    .arg("--all-envs")
+    .arg("--env=__VMSH_TEST_MARKER=overridden")
+    .env("__VMSH_TEST_MARKER", "original")
+    .run(&["/bin/sh", "-c", "echo $__VMSH_TEST_MARKER"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -603,7 +632,7 @@ fn boot_gz_kernel() {
     return;
   }
   let compressed = compress_kernel("gzip", &["-c"]);
-  let output = run_with_kernel(compressed.path(), "true\n", &[]);
+  let output = Vm::new().kernel(compressed.path()).run_shell("true\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -626,7 +655,7 @@ fn boot_bz2_kernel() {
     return;
   }
   let compressed = compress_kernel("bzip2", &["-c"]);
-  let output = run_with_kernel(compressed.path(), "true\n", &[]);
+  let output = Vm::new().kernel(compressed.path()).run_shell("true\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -644,7 +673,7 @@ fn boot_zstd_kernel() {
     return;
   }
   let compressed = compress_kernel("zstd", &["-c", "-q"]);
-  let output = run_with_kernel(compressed.path(), "true\n", &[]);
+  let output = Vm::new().kernel(compressed.path()).run_shell("true\n");
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -665,7 +694,7 @@ fn network_tcp_connection() {
     "import socket; s=socket.socket(); s.settimeout(2); \
      s.connect(('127.0.0.1',{port})); s.send(b'vmsh-tsi-test'); s.close()"
   );
-  let output = run_command(&["/usr/bin/python3", "-c", &py]);
+  let output = Vm::new().run(&["/usr/bin/python3", "-c", &py]);
   assert_ne!(
     output.status.code(),
     Some(0),
@@ -681,7 +710,7 @@ fn network_tcp_connection() {
     String::from_utf8_lossy(&buf[..n]).to_string()
   });
 
-  let output = run_command_with_env(&["/usr/bin/python3", "-c", &py], &["--net"], &[]);
+  let output = Vm::new().arg("--net").run(&["/usr/bin/python3", "-c", &py]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -713,7 +742,7 @@ fn uds_connection() {
   );
 
   // Without --uds, UDS connect should fail.
-  let output = run_command(&["/usr/bin/python3", "-c", &py]);
+  let output = Vm::new().run(&["/usr/bin/python3", "-c", &py]);
   assert_ne!(
     output.status.code(),
     Some(0),
@@ -728,7 +757,7 @@ fn uds_connection() {
     String::from_utf8_lossy(&buf[..n]).to_string()
   });
 
-  let output = run_command_with_env(&["/usr/bin/python3", "-c", &py], &["--uds"], &[]);
+  let output = Vm::new().arg("--uds").run(&["/usr/bin/python3", "-c", &py]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
