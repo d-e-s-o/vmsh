@@ -154,6 +154,68 @@ static void bring_up_loopback(void) {
   close(sockfd);
 }
 
+/* Find a named virtio console port.
+ *
+ * Scans /sys/class/virtio-ports/ for a port whose name matches
+ * `target_name`. On success, writes the device path (e.g.
+ * "/dev/vport0p1") to `dev_path` and returns 0. Returns -1 if the port
+ * is not found after `max_attempts` polling iterations (1 ms apart).
+ */
+static int find_virtio_port(const char *target_name, char *dev_path,
+                            size_t dev_path_size, int max_attempts) {
+  const struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000}; /* 1 ms */
+  DIR *dir = NULL;
+
+  for (int attempt = 0; attempt < max_attempts; attempt++) {
+    if (attempt > 0)
+      nanosleep(&delay, NULL);
+
+    if (!dir) {
+      dir = opendir("/sys/class/virtio-ports");
+      if (!dir)
+        continue;
+    } else {
+      rewinddir(dir);
+    }
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+      if (entry->d_name[0] == '.')
+        continue;
+
+      char name_path[512];
+      snprintf(name_path, sizeof(name_path), "/sys/class/virtio-ports/%s/name",
+               entry->d_name);
+
+      FILE *f = fopen(name_path, "r");
+      if (!f)
+        continue;
+
+      char port_name[64];
+      if (!fgets(port_name, sizeof(port_name), f)) {
+        fclose(f);
+        continue;
+      }
+      fclose(f);
+
+      /* Trim trailing whitespace. */
+      size_t len = strlen(port_name);
+      while (len > 0 &&
+             (port_name[len - 1] == '\n' || port_name[len - 1] == '\r'))
+        port_name[--len] = '\0';
+
+      if (strcmp(port_name, target_name) == 0) {
+        snprintf(dev_path, dev_path_size, "/dev/%s", entry->d_name);
+        closedir(dir);
+        return 0;
+      }
+    }
+  }
+  if (dir)
+    closedir(dir);
+  return -1;
+}
+
 /* Load environment variables from a file written by the host.
  *
  * The kernel command line has a limited number of env var slots
