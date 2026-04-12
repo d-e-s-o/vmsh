@@ -277,86 +277,59 @@ static void set_exit_code(int code) {
   close(fd);
 }
 
-/* Scan virtio-ports for krun-stdin/stdout/stderr and redirect fds.
+/* Redirect stdin/stdout/stderr to virtio console ports.
  *
- * The virtio console port discovery is asynchronous: the host-guest
- * handshake (DEVICE_READY -> PORT_ADD -> PORT_READY -> PORT_NAME ->
- * PORT_OPEN) can lag behind the guest init. When VMSH_REDIRECT is
- * set, we know how many ports to expect and poll until they appear
- * (up to 500 ms).
+ * VMSH_STDIN, VMSH_STDOUT, and VMSH_STDERR signal which file
+ * descriptors have been redirected and need a corresponding virtio
+ * console port. Each port is discovered and dup2'd onto the
+ * corresponding file descriptor.
  */
 static void setup_redirects(void) {
-  const char *env = getenv("VMSH_REDIRECT");
-  int expected = env ? atoi(env) : 0;
-  if (expected <= 0)
-    return; /* terminal mode -- nothing to redirect */
+  struct redirect {
+    const char *port_name;
+    int target_fd;
+    int flags;
+    int done;
+  };
 
-  /* The number of FDs successfully dup2'd. */
-  int redirected = 0;
-  int done[3] = {0, 0, 0}; /* per-FD flags */
-  const struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000}; /* 1 ms */
+  struct redirect redirects[3];
+  int count = 0;
 
-  for (int attempt = 0; attempt < 500 && redirected < expected; attempt++) {
+  if (getenv("VMSH_STDIN"))
+    redirects[count++] = (struct redirect){"krun-stdin", STDIN_FILENO, O_RDONLY, 0};
+  if (getenv("VMSH_STDOUT"))
+    redirects[count++] = (struct redirect){"krun-stdout", STDOUT_FILENO, O_WRONLY, 0};
+  if (getenv("VMSH_STDERR"))
+    redirects[count++] = (struct redirect){"krun-stderr", STDERR_FILENO, O_WRONLY, 0};
+
+  if (count == 0)
+    return;
+
+  /* Poll all pending ports concurrently, 1 ms apart, up to 500 ms. */
+  const struct timespec delay = {.tv_sec = 0, .tv_nsec = 1000000};
+  int remaining = count;
+
+  for (int attempt = 0; attempt < 500 && remaining > 0; attempt++) {
     if (attempt > 0)
       nanosleep(&delay, NULL);
 
-    DIR *dir = opendir("/sys/class/virtio-ports");
-    if (!dir)
-      continue;
-
-    struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
-      if (entry->d_name[0] == '.')
-        continue;
-
-      char name_path[512];
-      snprintf(name_path, sizeof(name_path), "/sys/class/virtio-ports/%s/name",
-               entry->d_name);
-
-      FILE *f = fopen(name_path, "r");
-      if (!f)
-        continue;
-
-      char port_name[64];
-      if (!fgets(port_name, sizeof(port_name), f)) {
-        fclose(f);
-        continue;
-      }
-      fclose(f);
-
-      /* Trim trailing whitespace. */
-      size_t len = strlen(port_name);
-      while (len > 0 &&
-             (port_name[len - 1] == '\n' || port_name[len - 1] == '\r'))
-        port_name[--len] = '\0';
-
-      int target_fd;
-      if (strcmp(port_name, "krun-stdin") == 0)
-        target_fd = STDIN_FILENO;
-      else if (strcmp(port_name, "krun-stdout") == 0)
-        target_fd = STDOUT_FILENO;
-      else if (strcmp(port_name, "krun-stderr") == 0)
-        target_fd = STDERR_FILENO;
-      else
-        continue;
-
-      if (done[target_fd])
+    for (int i = 0; i < count; i++) {
+      if (redirects[i].done)
         continue;
 
       char dev_path[512];
-      snprintf(dev_path, sizeof(dev_path), "/dev/%s", entry->d_name);
+      if (find_virtio_port(redirects[i].port_name, dev_path, sizeof(dev_path), 1) < 0)
+        continue;
 
-      int flags = (target_fd == STDIN_FILENO) ? O_RDONLY : O_WRONLY;
-      int fd = open(dev_path, flags);
+      int fd = open(dev_path, redirects[i].flags);
       if (fd >= 0) {
-        dup2(fd, target_fd);
-        if (fd != target_fd)
+        dup2(fd, redirects[i].target_fd);
+        if (fd != redirects[i].target_fd)
           close(fd);
-        done[target_fd] = 1;
-        redirected++;
       }
+      redirects[i].done = 1;
+      remaining--;
     }
-    closedir(dir);
   }
 }
 

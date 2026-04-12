@@ -181,13 +181,15 @@ fn set_exec(ctx: u32, command: Vec<String>, env_file: Option<&Path>) -> Result<(
   let hostname = c"HOSTNAME=krun-boot";
   let home = c"HOME=/root";
 
-  // Count how many of stdin/stdout/stderr are non-terminal. `libkrun`
-  // creates virtio console ports for redirected FDs; let the guest init
-  // know how many to expect so it can wait for them.
+  // Determine which of stdin/stdout/stderr are non-terminal.
+  // `libkrun` creates virtio console ports for redirected FDs; tell the
+  // guest init which ports to look for.
   // SAFETY: `isatty` is always safe to call.
-  let redirect_count = unsafe { (libc::isatty(libc::STDIN_FILENO) == 0) as u8 }
-    + unsafe { (libc::isatty(libc::STDOUT_FILENO) == 0) as u8 }
-    + unsafe { (libc::isatty(libc::STDERR_FILENO) == 0) as u8 };
+  let stdin_redir = unsafe { libc::isatty(libc::STDIN_FILENO) == 0 };
+  // SAFETY: `isatty` is always safe to call.
+  let stdout_redir = unsafe { libc::isatty(libc::STDOUT_FILENO) == 0 };
+  // SAFETY: `isatty` is always safe to call.
+  let stderr_redir = unsafe { libc::isatty(libc::STDERR_FILENO) == 0 };
 
   let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr()];
 
@@ -197,10 +199,14 @@ fn set_exec(ctx: u32, command: Vec<String>, env_file: Option<&Path>) -> Result<(
     let () = env_ptrs.push(env_file_env.as_ptr());
   }
 
-  let redirect_env;
-  if redirect_count > 0 {
-    redirect_env = CString::new(format!("VMSH_REDIRECT={redirect_count}"))?;
-    let () = env_ptrs.push(redirect_env.as_ptr());
+  if stdin_redir {
+    let () = env_ptrs.push(c"VMSH_STDIN=1".as_ptr());
+  }
+  if stdout_redir {
+    let () = env_ptrs.push(c"VMSH_STDOUT=1".as_ptr());
+  }
+  if stderr_redir {
+    let () = env_ptrs.push(c"VMSH_STDERR=1".as_ptr());
   }
 
   let () = env_ptrs.push(ptr::null());
