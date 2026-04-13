@@ -548,6 +548,7 @@ fn env_override_with_all_envs() {
 fn has_tool(name: &str) -> bool {
   Command::new(name)
     .arg("--version")
+    .stdin(Stdio::null())
     .stdout(Stdio::null())
     .stderr(Stdio::null())
     .status()
@@ -642,14 +643,9 @@ fn boot_gz_kernel() {
 }
 
 /// Test booting from a bzip2-compressed kernel.
-#[expect(unreachable_code)]
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn boot_bz2_kernel() {
-  // TODO: `libkrun` has a bug where it cannot correctly detect bzip2
-  //       headers. Re-enable this test once the upstream fix landed.
-  return;
-
   if !has_tool("bzip2") {
     eprintln!("warning: bzip2 not found, skipping test");
     return;

@@ -27,7 +27,7 @@ anyhow = { version = "1" }
 clap = { version = "4", features = ["derive"] }
 libc = { version = "0.2" }
 # TODO: Switch to release >1.17.4 once published.
-libkrun = { git = "https://github.com/containers/libkrun.git", rev = "44312fdfa105256f1988ea8cdfbde8ed1532c944" }
+libkrun = { git = "https://github.com/containers/libkrun.git", rev = "eaac6623265711cc1a2d707c0df4144f26e09ec6" }
 # Explicitly pin the otherwise transitive `vm-memory` dependency, to fix
 # version resolution otherwise resulting in broken build.
 _vm-memory_unused = { package = "vm-memory", version = "=0.17.1" }
