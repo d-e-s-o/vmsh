@@ -11,13 +11,18 @@ use std::ffi::c_char;
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::ffi::OsString;
-use std::fs;
 use std::fs::remove_file;
 use std::fs::write;
+use std::fs::File;
+use std::io::Seek as _;
+use std::io::Write as _;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::io::AsRawFd as _;
+use std::os::unix::io::FromRawFd as _;
+use std::os::unix::io::OwnedFd;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process;
@@ -79,8 +84,7 @@ fn deploy_init_binary(path: &Path) -> Result<CleanupGuard> {
 }
 
 
-/// Build the content of the environment file from CLI flags and host
-/// env.
+/// Build the environment variable payload from CLI flags and host env.
 ///
 /// Variables that are reserved or overridden by vmsh (`VMSH_*`) or
 /// internal to libkrun (`KRUN_*`) are excluded when `all_envs` is set.
@@ -127,23 +131,22 @@ fn build_env_content(
 }
 
 
-/// Write host environment variables to a file for the guest init to load.
-///
-/// Returns `None` when there are no variables to forward, skipping the
-/// file creation entirely.
-fn write_env_file(
-  path: &Path,
-  env_args: &[String],
-  all_envs: bool,
-) -> Result<Option<CleanupGuard>> {
-  let buf = build_env_content(env_args, all_envs, env::vars_os());
-  if buf.is_empty() {
-    return Ok(None);
-  }
-  let () = fs::write(path, &buf)
-    .with_context(|| format!("failed to write env file to `{}`", path.display()))?;
-  let guard = CleanupGuard(Some(path.to_path_buf()));
-  Ok(Some(guard))
+/// Create a memfd containing the environment variable payload.
+fn create_env_memfd(content: &[u8]) -> Result<OwnedFd> {
+  // SAFETY: "vmsh-env" is a valid NUL-terminated name.
+  let fd = unsafe { libc::memfd_create(c"vmsh-env".as_ptr(), 0) };
+  ensure!(fd >= 0, "failed to create memfd for env vars");
+
+  // SAFETY: `memfd_create` succeeded, so `fd` is a valid, open file
+  //         descriptor that we own.
+  let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+  let mut file = File::from(fd);
+  let () = file
+    .write_all(content)
+    .context("failed to write env vars to memfd")?;
+  let () = file.rewind().context("failed to seek memfd to start")?;
+
+  Ok(file.into())
 }
 
 
@@ -175,9 +178,9 @@ fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) 
 }
 
 
-fn set_exec(ctx: u32, command: Vec<String>, env_file: Option<&Path>) -> Result<()> {
+fn set_exec(ctx: u32, command: Vec<String>, has_env_port: bool) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
-  // overwritten by any user provided values (present in `env_file`).
+  // overwritten by any user provided values (present on the env port).
   let hostname = c"HOSTNAME=krun-boot";
   let home = c"HOME=/root";
 
@@ -193,10 +196,10 @@ fn set_exec(ctx: u32, command: Vec<String>, env_file: Option<&Path>) -> Result<(
 
   let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr()];
 
-  let env_file_env;
-  if let Some(path) = env_file {
-    env_file_env = CString::new(format!("VMSH_ENV_FILE={}", path.display()))?;
-    let () = env_ptrs.push(env_file_env.as_ptr());
+  // Tell the guest init to look for a "krun-env" virtio console port.
+  let env_port_env = c"VMSH_ENV_PORT=1";
+  if has_env_port {
+    let () = env_ptrs.push(env_port_env.as_ptr());
   }
 
   if stdin_redir {
@@ -320,10 +323,34 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
   let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
   ensure!(rc >= 0, "failed to set root filesystem");
 
-  let env_path = temp_dir().join(format!("vmsh-env-{}", process::id()));
-  let _env_guard = write_env_file(&env_path, &env_vars, all_envs)?;
-  let env_file = _env_guard.as_deref();
-  let () = set_exec(ctx, command, env_file)?;
+  // Pass environment variables to the guest via a virtio console port
+  // backed by a memfd. The guest init discovers the port by name and
+  // reads KEY=VALUE lines until EOF.
+  let env_content = build_env_content(&env_vars, all_envs, env::vars_os());
+  let has_env_port = !env_content.is_empty();
+  let env_fd;
+  if has_env_port {
+    env_fd = create_env_memfd(&env_content)?;
+
+    // SAFETY: `ctx` is a valid krun context.
+    let console_id = unsafe { krun::krun_add_virtio_console_multiport(ctx) };
+    ensure!(console_id >= 0, "failed to add virtio console for env port");
+
+    // SAFETY: `ctx` is a valid krun context, `console_id` is a valid
+    //         console index, "krun-env" is NUL-terminated, and `env_fd`
+    //         is a valid, open file descriptor.
+    let rc = unsafe {
+      krun::krun_add_console_port_inout(
+        ctx,
+        console_id as u32,
+        c"krun-env".as_ptr(),
+        env_fd.as_raw_fd(),
+        -1,
+      )
+    };
+    ensure!(rc >= 0, "failed to add env console port");
+  }
+  let () = set_exec(ctx, command, has_env_port)?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");

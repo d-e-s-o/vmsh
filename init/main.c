@@ -216,26 +216,32 @@ static int find_virtio_port(const char *target_name, char *dev_path,
   return -1;
 }
 
-/* Load environment variables from a file written by the host.
+/* Load environment variables from a virtio console port.
  *
  * The kernel command line has a limited number of env var slots
  * (CONFIG_INIT_ENV_ARG_LIMIT, typically 32), so we pass bulk env vars
- * through a file on the virtiofs-shared filesystem instead.
+ * through a dedicated virtio console port backed by a memfd on the host.
  *
  * The file format is one KEY=VALUE per line (newline-delimited, no
  * quoting). Lines without '=' or empty lines are skipped.
  */
-static void load_env_file(void) {
-  const char *path = getenv("VMSH_ENV_FILE");
-  if (!path)
+static void load_env_vars(void) {
+  if (!getenv("VMSH_ENV_PORT"))
     return;
 
-  FILE *f = fopen(path, "r");
-  if (!f)
+  char dev_path[512];
+  if (find_virtio_port("krun-env", dev_path, sizeof(dev_path), 500) < 0)
     return;
 
-  /* Remove the file now that we have it open. */
-  unlink(path);
+  int fd = open(dev_path, O_RDONLY);
+  if (fd < 0)
+    return;
+
+  FILE *f = fdopen(fd, "r");
+  if (!f) {
+    close(fd);
+    return;
+  }
 
   char *line = NULL;
   size_t cap = 0;
@@ -380,9 +386,7 @@ int main(int argc, char *argv[]) {
 
   /* Bring up loopback interface. */
   bring_up_loopback();
-
-  /* Load host environment variables from the shared filesystem. */
-  load_env_file();
+  load_env_vars();
 
   /* Set hostname. */
   const char *hostname = getenv("HOSTNAME");
