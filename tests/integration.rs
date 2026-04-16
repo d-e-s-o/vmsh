@@ -27,6 +27,7 @@ struct Vm {
   kernel: Option<PathBuf>,
   args: Vec<String>,
   env_vars: Vec<(String, String)>,
+  cwd: Option<PathBuf>,
 }
 
 impl Vm {
@@ -35,6 +36,7 @@ impl Vm {
       kernel: None,
       args: Vec::new(),
       env_vars: Vec::new(),
+      cwd: None,
     }
   }
 
@@ -53,8 +55,13 @@ impl Vm {
     self
   }
 
-  fn kernel_path(&self) -> Cow<'_, Path> {
+  fn cwd(mut self, path: &Path) -> Self {
+    self.cwd = Some(path.to_path_buf());
     self
+  }
+
+  fn kernel_path(&self) -> Cow<'_, Path> {
+    let path = self
       .kernel
       .as_deref()
       .map(Cow::Borrowed)
@@ -62,7 +69,17 @@ impl Vm {
         Cow::Owned(PathBuf::from(
           env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"),
         ))
-      })
+      });
+    // Resolve relative paths against the original working directory
+    // (before any `.cwd()` override takes effect).
+    if path.is_relative() {
+      let abs = env::current_dir()
+        .expect("failed to get current dir")
+        .join(path);
+      Cow::Owned(abs)
+    } else {
+      path
+    }
   }
 
   fn apply_env(&self, cmd: &mut Command) {
@@ -71,10 +88,17 @@ impl Vm {
     }
   }
 
+  fn apply_cwd(&self, cmd: &mut Command) {
+    if let Some(dir) = &self.cwd {
+      cmd.current_dir(dir);
+    }
+  }
+
   /// Run a shell snippet inside the VM via stdin.
   fn run_shell(&self, input: &str) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vmsh"));
     let () = self.apply_env(&mut cmd);
+    let () = self.apply_cwd(&mut cmd);
 
     cmd
       .args(&self.args)
@@ -94,6 +118,7 @@ impl Vm {
   fn run(&self, args: &[&str]) -> Output {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_vmsh"));
     let () = self.apply_env(&mut cmd);
+    let () = self.apply_cwd(&mut cmd);
 
     cmd
       .args(&self.args)
