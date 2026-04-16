@@ -457,6 +457,86 @@ fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
 }
 
 
+/// Mount virtiofs shares specified in `VMSH_SHARES`.
+///
+/// Format: `tag:path:mode[;tag:path:mode]...`
+/// where mode is `rw` or `ro`.
+///
+/// Each entry is mounted at the specified path. Parent directories
+/// are created if needed.
+fn mount_shares() {
+  let spec = match env::var("VMSH_SHARES") {
+    Ok(s) if !s.is_empty() => s,
+    _ => return,
+  };
+
+  for entry in spec.split(';') {
+    // Parse tag:path[:mode]
+    let mut parts = entry.splitn(3, ':');
+    let tag = match parts.next() {
+      Some(t) if !t.is_empty() => t,
+      _ => {
+        eprintln!("vmsh-init: warning: malformed share entry: {entry}");
+        continue;
+      },
+    };
+    let path = match parts.next() {
+      Some(p) if !p.is_empty() => p,
+      _ => {
+        eprintln!("vmsh-init: warning: malformed share entry: {entry}");
+        continue;
+      },
+    };
+    // mode (rw/ro) is informational here; the read-only enforcement
+    // happens at the virtiofs level in libkrun.
+
+    let () = DirBuilder::new()
+      .mode(0o755)
+      .recursive(true)
+      .create(path)
+      .unwrap_or_else(|e| eprintln!("vmsh-init: warning: mkdir {path}: {e}"));
+
+    let c_tag = match CString::new(tag) {
+      Ok(s) => s,
+      Err(_) => continue,
+    };
+    let c_path = match CString::new(path) {
+      Ok(s) => s,
+      Err(_) => continue,
+    };
+    // SAFETY: Both arguments are valid NUL-terminated strings.
+    let ret = unsafe { mount(c_tag.as_ptr(), c_path.as_ptr(), c"virtiofs".as_ptr(), 0, ptr::null()) };
+    if ret < 0 {
+      let err = io::Error::last_os_error();
+      eprintln!("vmsh-init: warning: mount virtiofs {tag} on {path}: {err}");
+    }
+  }
+}
+
+/// Hide paths specified in `VMSH_HIDE` by mounting empty tmpfs over them.
+///
+/// Format: `path[;path]...`
+fn hide_paths() {
+  let spec = match env::var("VMSH_HIDE") {
+    Ok(s) if !s.is_empty() => s,
+    _ => return,
+  };
+
+  for path in spec.split(';') {
+    // SAFETY: Arguments are valid NUL-terminated strings.
+    let c_path = match CString::new(path) {
+      Ok(s) => s,
+      Err(_) => continue,
+    };
+    let ret = unsafe { mount(c"tmpfs".as_ptr(), c_path.as_ptr(), c"tmpfs".as_ptr(), 0, c"size=0".as_ptr().cast()) };
+    if ret < 0 {
+      let err = io::Error::last_os_error();
+      eprintln!("vmsh-init: warning: hide {path}: {err}");
+    }
+  }
+}
+
+
 /// Delete colon-separated paths listed in `VMSH_UNLINK`.
 fn unlink_temp_files() {
   let list = match env::var("VMSH_UNLINK") {
@@ -473,10 +553,6 @@ fn unlink_temp_files() {
 fn main() {
   const TSI_WARNING: &str = "vmsh-init: warning: kernel does not support TSI networking; \
    use a TSI-patched kernel or omit --net argument to vmsh";
-
-  // Remove temporary files early -- the host code won't get a chance
-  // because libkrun exits the process hard on VM exit.
-  let () = unlink_temp_files();
 
   // Set up shared mount propagation on root.
   let () = mount_or_warn(
@@ -523,7 +599,23 @@ fn main() {
 
   // Bring up loopback interface.
   let () = bring_up_loopback();
+
+  // Mount virtiofs shares first so that /tmp (and other paths) become
+  // writable. This must happen before unlink/load_env_vars, because the
+  // root filesystem may be read-only and those files live in /tmp.
+  let () = mount_shares();
+
+  // Remove temporary files now that rw shares are mounted. We must do
+  // this on the guest side because libkrun exits the host process hard
+  // on VM exit, so the host-side RAII cleanup never runs.
+  let () = unlink_temp_files();
+
+  // Load environment variables from the virtio console port.
   let () = load_env_vars();
+
+  // Hide paths after loading env (in case the env file sits under a
+  // path that will be hidden).
+  let () = hide_paths();
 
   // Set hostname.
   let hostname = env::var_os("HOSTNAME").unwrap_or_else(|| OsString::from("localhost"));

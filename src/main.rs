@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
 use std::env::temp_dir;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -41,6 +42,132 @@ use crate::args::Args;
 use crate::args::Command;
 use crate::args::RunArgs;
 
+
+/// The action to take for a given filesystem path in the guest.
+#[derive(Clone, Debug, PartialEq)]
+enum ShareAction {
+  /// Share the path read-write via a virtiofs device.
+  ReadWrite,
+  /// Share the path read-only via a virtiofs device. This is only
+  /// needed for explicit `--share-ro` requests; the default read-only
+  /// root already covers most paths.
+  ReadOnly,
+  /// Hide the path by mounting an empty tmpfs over it in the guest.
+  Hide,
+}
+
+
+/// Compute the final list of filesystem shares and hide actions.
+///
+/// Starts with defaults (cwd rw, /tmp rw), then applies user flags
+/// in fixed group order: `--share-rw`, then `--share-ro`, then
+/// `--hide`. When the same path appears in multiple groups, the
+/// later group wins (`--hide` > `--share-ro` > `--share-rw`).
+///
+/// Returns the list of `(path, action)` pairs and whether the root
+/// should be read-only (false only if `--share-rw /` was given).
+fn compute_shares(
+  cwd: &Path,
+  share_rw: &[PathBuf],
+  share_ro: &[PathBuf],
+  hide: &[PathBuf],
+) -> (Vec<(PathBuf, ShareAction)>, bool) {
+  // We need to process arguments in the order they were given on the
+  // command line. Since clap collects each flag into its own Vec, we
+  // reconstruct the ordering by interleaving them according to their
+  // original positions. However, clap doesn't expose argument positions
+  // easily, so we use a simpler model: defaults first, then --share-rw,
+  // then --share-ro, then --hide. This means --hide always beats
+  // --share-rw for the same path (which is the last-wins semantics
+  // applied to the flag groups in this fixed order).
+  //
+  // For truly order-dependent semantics we would need a single
+  // `--share` flag with inline mode syntax, but the current approach is
+  // simpler and covers the expected use cases.
+  let mut map = Vec::<(PathBuf, ShareAction)>::new();
+
+  // Apply defaults.
+  let () = map.push((cwd.to_path_buf(), ShareAction::ReadWrite));
+  let () = map.push((PathBuf::from("/tmp"), ShareAction::ReadWrite));
+
+  // Apply user overrides in flag-group order.
+  for path in share_rw {
+    let () = map.push((path.clone(), ShareAction::ReadWrite));
+  }
+  for path in share_ro {
+    let () = map.push((path.clone(), ShareAction::ReadOnly));
+  }
+  for path in hide {
+    let () = map.push((path.clone(), ShareAction::Hide));
+  }
+
+  // Deduplicate: last-wins. Walk backwards, keep only the first
+  // occurrence of each canonical path.
+  let mut seen = Vec::new();
+  let mut deduped = Vec::new();
+  for (path, action) in map.into_iter().rev() {
+    if seen.iter().any(|p: &PathBuf| p == &path) {
+      continue;
+    }
+    let () = seen.push(path.clone());
+    let () = deduped.push((path, action));
+  }
+  let () = deduped.reverse();
+
+  // The root path is always handled via the root virtiofs device
+  // (krun_add_virtiofs3 with KRUN_FS_ROOT_TAG), so remove it from the
+  // per-share list and derive the read-only flag from the action.
+  let root = Path::new("/");
+  let root_action = deduped
+    .iter()
+    .find(|(p, _)| p == root)
+    .map(|(_, a)| a.clone());
+  let () = deduped.retain(|(p, _)| p != root);
+  let root_read_only = !matches!(root_action, Some(ShareAction::ReadWrite));
+
+  (deduped, root_read_only)
+}
+
+
+/// Format share metadata as an environment variable value.
+///
+/// Format: `tag:path:mode[;tag:path:mode]...`
+/// where mode is `rw` or `ro`.
+fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> String {
+  shares
+    .iter()
+    .filter(|(_, a)| matches!(a, ShareAction::ReadWrite | ShareAction::ReadOnly))
+    .enumerate()
+    .map(|(i, (path, action))| {
+      let mode = match action {
+        ShareAction::ReadWrite => "rw",
+        ShareAction::ReadOnly => "ro",
+        ShareAction::Hide => unreachable!(),
+      };
+      format!("vmsh-{i}:{}:{mode}", path.display())
+    })
+    .collect::<Vec<_>>()
+    .join(";")
+}
+
+
+/// Format hide list as an environment variable value.
+///
+/// Format: `path[;path]...`
+fn format_hide_env(shares: &[(PathBuf, ShareAction)]) -> String {
+  shares
+    .iter()
+    .filter(|(_, a)| matches!(a, ShareAction::Hide))
+    .map(|(path, _)| format!("{}", path.display()))
+    .collect::<Vec<_>>()
+    .join(";")
+}
+
+
+/// The virtiofs tag used by libkrun for the root filesystem device.
+///
+/// Corresponds to `KRUN_FS_ROOT_TAG` in `libkrun.h`.
+const KRUN_FS_ROOT_TAG: &CStr = c"/dev/root";
 
 /// Embedded init binary.
 const INIT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmsh-init"));
@@ -186,6 +313,8 @@ fn set_exec(
   command: Vec<String>,
   has_env_port: bool,
   unlink_paths: &[&Path],
+  shares_env: Option<&str>,
+  hide_env: Option<&str>,
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values (present on the env port).
@@ -236,6 +365,18 @@ fn set_exec(
     let () = env_ptrs.push(c"VMSH_STDERR=1".as_ptr());
   }
 
+  let shares_env_cstr;
+  if let Some(val) = shares_env {
+    shares_env_cstr = CString::new(format!("VMSH_SHARES={val}"))?;
+    let () = env_ptrs.push(shares_env_cstr.as_ptr());
+  }
+
+  let hide_env_cstr;
+  if let Some(val) = hide_env {
+    hide_env_cstr = CString::new(format!("VMSH_HIDE={val}"))?;
+    let () = env_ptrs.push(hide_env_cstr.as_ptr());
+  }
+
   let () = env_ptrs.push(ptr::null());
 
   // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
@@ -280,6 +421,9 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     env_vars,
     all_envs,
     verbosity,
+    share_rw,
+    share_ro,
+    hide,
   } = args;
 
   // SANITY: Caller guarantees that a kernel is always set.
@@ -344,11 +488,63 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
 
   let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
 
+  // Compute filesystem shares. By default, the root is read-only with
+  // the cwd and /tmp shared read-write. User flags override this.
+  let cwd = env::current_dir()
+    .and_then(|p| p.canonicalize())
+    .context("failed to determine current directory")?;
+  let _cwd = cwd
+    .to_str()
+    .context("current directory path is not valid UTF-8")?;
+  let (shares, root_read_only) = compute_shares(&cwd, &share_rw, &share_ro, &hide);
+
+  // Set up the root filesystem via the well-known root virtiofs tag.
+  // By default the root is read-only; `--share-rw /` makes it rw.
   let c_rootfs = c"/";
-  // SAFETY: `ctx` is a valid krun context and `c_rootfs` is a valid
-  //         NUL-terminated string.
-  let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
+  // Use the same 512 MiB DAX window that `krun_set_root` uses.
+  const ROOT_SHM_SIZE: u64 = 1 << 29;
+  // SAFETY: `ctx` is a valid krun context, `KRUN_FS_ROOT_TAG` and
+  //         `c_rootfs` are valid NUL-terminated strings.
+  let rc = unsafe {
+    krun::krun_add_virtiofs3(
+      ctx,
+      KRUN_FS_ROOT_TAG.as_ptr(),
+      c_rootfs.as_ptr(),
+      ROOT_SHM_SIZE,
+      root_read_only,
+    )
+  };
   ensure!(rc >= 0, "failed to set root filesystem");
+
+  // Add virtiofs devices for each share (rw or explicit ro).
+  let mut share_idx = 0u32;
+  for (path, action) in &shares {
+    let read_only = match action {
+      ShareAction::ReadWrite => false,
+      ShareAction::ReadOnly => true,
+      ShareAction::Hide => continue,
+    };
+    let tag = format!("vmsh-{share_idx}");
+    let c_tag = CString::new(tag)?;
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: `ctx` is a valid krun context, `c_tag` and `c_path` are
+    //         valid NUL-terminated strings.
+    let rc =
+      unsafe { krun::krun_add_virtiofs3(ctx, c_tag.as_ptr(), c_path.as_ptr(), 0, read_only) };
+    ensure!(
+      rc >= 0,
+      "failed to add virtiofs share for `{}`",
+      path.display()
+    );
+    share_idx += 1;
+  }
+
+  // Set the working directory to the host cwd.
+  let c_workdir = CString::new(cwd.as_os_str().as_bytes())?;
+  // SAFETY: `ctx` is a valid krun context and `c_workdir` is a valid
+  //         NUL-terminated string.
+  let rc = unsafe { krun::krun_set_workdir(ctx, c_workdir.as_ptr()) };
+  ensure!(rc >= 0, "failed to set working directory");
 
   // Pass environment variables to the guest via a virtio console port
   // backed by a memfd. The guest init discovers the port by name and
@@ -377,7 +573,29 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     };
     ensure!(rc >= 0, "failed to add env console port");
   }
-  let () = set_exec(ctx, command, has_env_port, unlink_paths)?;
+
+  // Build share and hide metadata for the guest init.
+  let shares_env_val = format_shares_env(&shares);
+  let shares_env = if shares_env_val.is_empty() {
+    None
+  } else {
+    Some(shares_env_val.as_str())
+  };
+  let hide_env_val = format_hide_env(&shares);
+  let hide_env = if hide_env_val.is_empty() {
+    None
+  } else {
+    Some(hide_env_val.as_str())
+  };
+
+  let () = set_exec(
+    ctx,
+    command,
+    has_env_port,
+    unlink_paths,
+    shares_env,
+    hide_env,
+  )?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");
@@ -563,5 +781,130 @@ mod tests {
     let text = String::from_utf8(content).unwrap();
     let count = text.matches("PATH=").count();
     assert_eq!(count, 1);
+  }
+
+
+  /// Default shares include cwd (rw) and /tmp (rw), with root as ro.
+  #[test]
+  fn default_shares() {
+    let cwd = PathBuf::from("/home/user/project");
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[], &[]);
+    assert!(root_ro);
+    assert_eq!(shares.len(), 2);
+    assert_eq!(
+      shares[0],
+      (PathBuf::from("/home/user/project"), ShareAction::ReadWrite)
+    );
+    assert_eq!(shares[1], (PathBuf::from("/tmp"), ShareAction::ReadWrite));
+  }
+
+  /// `--share-rw /data` adds an rw entry.
+  #[test]
+  fn share_rw_adds_path() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/data")], &[], &[]);
+    assert!(root_ro);
+    assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
+  }
+
+  /// `--share-ro /opt` adds an ro entry.
+  #[test]
+  fn share_ro_adds_path() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/opt")], &[]);
+    assert!(root_ro);
+    assert!(shares.contains(&(PathBuf::from("/opt"), ShareAction::ReadOnly)));
+  }
+
+  /// `--hide /tmp` removes the default /tmp share and replaces it
+  /// with a hide action.
+  #[test]
+  fn hide_removes_default() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, _) = compute_shares(&cwd, &[], &[], &[PathBuf::from("/tmp")]);
+    assert!(!shares.contains(&(PathBuf::from("/tmp"), ShareAction::ReadWrite)));
+    assert!(shares.contains(&(PathBuf::from("/tmp"), ShareAction::Hide)));
+  }
+
+  /// Last-wins: `--share-ro /data --share-rw /data` results in rw.
+  /// (In our fixed ordering, --share-rw comes before --share-ro,
+  /// so --share-ro would win. But if both are rw, the last rw wins.)
+  #[test]
+  fn last_wins_same_flag_type() {
+    let cwd = PathBuf::from("/home/user");
+    // --share-rw /data appears first, but --share-ro /data comes
+    // later in the fixed ordering.
+    let (shares, _) = compute_shares(
+      &cwd,
+      &[PathBuf::from("/data")],
+      &[PathBuf::from("/data")],
+      &[],
+    );
+    // --share-ro group comes after --share-rw, so ro wins.
+    assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadOnly)));
+    assert!(!shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
+  }
+
+  /// `--share-rw /etc --hide /etc` results in /etc hidden
+  /// (hide group comes last).
+  #[test]
+  fn last_wins_hide_over_share() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, _) = compute_shares(
+      &cwd,
+      &[PathBuf::from("/etc")],
+      &[],
+      &[PathBuf::from("/etc")],
+    );
+    assert!(shares.contains(&(PathBuf::from("/etc"), ShareAction::Hide)));
+    assert!(!shares.contains(&(PathBuf::from("/etc"), ShareAction::ReadWrite)));
+  }
+
+  /// `--share-rw /` disables isolation (root is rw).
+  #[test]
+  fn share_rw_root_disables_isolation() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/")], &[], &[]);
+    assert!(!root_ro);
+    // The "/" entry itself is removed from shares.
+    assert!(!shares.iter().any(|(p, _)| p == Path::new("/")));
+  }
+
+  /// `--share-ro /` is a no-op: root is already read-only and no
+  /// redundant share entry is produced.
+  #[test]
+  fn share_ro_root_is_noop() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/")], &[]);
+    assert!(root_ro);
+    assert!(!shares.iter().any(|(p, _)| p == Path::new("/")));
+  }
+
+  /// Verify the `VMSH_SHARES` env var format.
+  #[test]
+  fn share_metadata_format() {
+    let shares = vec![
+      (PathBuf::from("/home/user/project"), ShareAction::ReadWrite),
+      (PathBuf::from("/tmp"), ShareAction::ReadWrite),
+      (PathBuf::from("/opt"), ShareAction::ReadOnly),
+      (PathBuf::from("/secret"), ShareAction::Hide),
+    ];
+    let env = format_shares_env(&shares);
+    assert_eq!(
+      env,
+      "vmsh-0:/home/user/project:rw;vmsh-1:/tmp:rw;vmsh-2:/opt:ro"
+    );
+  }
+
+  /// Verify the `VMSH_HIDE` env var format.
+  #[test]
+  fn hide_metadata_format() {
+    let shares = vec![
+      (PathBuf::from("/home/user/project"), ShareAction::ReadWrite),
+      (PathBuf::from("/secret"), ShareAction::Hide),
+      (PathBuf::from("/other"), ShareAction::Hide),
+    ];
+    let env = format_hide_env(&shares);
+    assert_eq!(env, "/secret;/other");
   }
 }

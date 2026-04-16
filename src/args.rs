@@ -1,8 +1,24 @@
+use std::fs::canonicalize;
 use std::path::PathBuf;
+
+use anyhow::Context as _;
+use anyhow::Result;
 
 use clap::ArgAction;
 use clap::Parser;
 use clap::Subcommand;
+
+
+fn parse_absolute_path(s: &str) -> Result<PathBuf> {
+  let p = canonicalize(s).with_context(|| format!("failed to resolve path `{s}`"))?;
+  let resolved = p
+    .to_str()
+    .ok_or_else(|| anyhow::anyhow!("path `{}` contains non-UTF-8 bytes", p.display()))?;
+  if resolved.contains(':') || resolved.contains(';') {
+    anyhow::bail!("path `{resolved}` contains reserved delimiter characters (':' or ';')");
+  }
+  Ok(p)
+}
 
 
 /// Transparently run a shell (or other binary) in a VM.
@@ -69,6 +85,27 @@ pub struct RunArgs {
   /// Increase verbosity (can be supplied multiple times).
   #[clap(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
   pub verbosity: u8,
+  /// Share a host path as read-write inside the guest.
+  ///
+  /// By default the guest sees the host filesystem as read-only.
+  /// This flag punches through a writable mount at the given path.
+  /// Can be specified multiple times. When the same path appears in
+  /// multiple flags, `--hide` takes precedence over `--share-ro`,
+  /// which takes precedence over `--share-rw`.
+  #[clap(long, value_parser = parse_absolute_path)]
+  pub share_rw: Vec<PathBuf>,
+  /// Share a host path as read-only inside the guest.
+  ///
+  /// Useful for sharing additional paths with explicit read-only
+  /// enforcement beyond what the read-only root already provides.
+  #[clap(long, value_parser = parse_absolute_path)]
+  pub share_ro: Vec<PathBuf>,
+  /// Hide a host path from the guest by mounting an empty tmpfs over it.
+  ///
+  /// This prevents the guest from reading the path's contents.
+  /// The underlying data remains protected by the read-only root.
+  #[clap(long, value_parser = parse_absolute_path)]
+  pub hide: Vec<PathBuf>,
 }
 
 
