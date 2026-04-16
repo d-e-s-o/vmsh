@@ -386,7 +386,7 @@ fn guest_writes_to_host_filesystem() {
   let file_path_str = file_path.to_str().unwrap();
   let content = "written_by_guest";
 
-  let output = Vm::new().run(&[
+  let output = Vm::new().arg("--share-rw=/").run(&[
     "/bin/sh",
     "-c",
     &format!("echo -n {content} > {file_path_str}"),
@@ -407,11 +407,12 @@ fn guest_writes_to_host_filesystem() {
   );
 }
 
-/// Check that the guest's working directory defaults to `/`.
+/// Check that the guest's working directory matches the host cwd.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn working_directory() {
-  let output = Vm::new().run(&["/bin/pwd"]);
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let output = Vm::new().cwd(dir.path()).run(&["/bin/pwd"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -419,10 +420,11 @@ fn working_directory() {
     "unexpected exit code; stderr:\n{stderr}",
   );
   let stdout = String::from_utf8_lossy(&output.stdout);
+  let expected = dir.path().to_str().unwrap();
   assert_eq!(
     stdout.trim(),
-    "/",
-    "guest working directory should be /, got: {stdout:?}",
+    expected,
+    "guest working directory should match host cwd, got: {stdout:?}",
   );
 }
 
@@ -788,9 +790,12 @@ fn uds_connection() {
     "import socket; s=socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); \
      s.connect('{sock_path_str}'); s.send(b'vmsh-uds-test'); s.close()"
   );
+  let share_arg = format!("--share-rw={}", dir.path().display());
 
   // Without --uds, UDS connect should fail.
-  let output = Vm::new().run(&["/usr/bin/python3", "-c", &py]);
+  let output = Vm::new()
+    .arg(&share_arg)
+    .run(&["/usr/bin/python3", "-c", &py]);
   assert_ne!(
     output.status.code(),
     Some(0),
@@ -805,7 +810,10 @@ fn uds_connection() {
     String::from_utf8_lossy(&buf[..n]).to_string()
   });
 
-  let output = Vm::new().arg("--uds").run(&["/usr/bin/python3", "-c", &py]);
+  let output = Vm::new()
+    .arg("--uds")
+    .arg(&share_arg)
+    .run(&["/usr/bin/python3", "-c", &py]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -999,5 +1007,215 @@ fn no_kernel_no_embed_errors() {
   assert!(
     stderr.contains("no kernel specified") || stderr.contains("no embedded kernel"),
     "error should mention missing kernel, got: {stderr:?}",
+  );
+}
+
+/// Verify that the root filesystem is read-only by default.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn default_ro_root() {
+  let output = Vm::new().run(&["/bin/sh", "-c", "touch /test-ro-file"]);
+  assert_ne!(
+    output.status.code(),
+    Some(0),
+    "touch should fail on read-only root; stdout:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+  );
+}
+
+/// Verify that the cwd is writable by default.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn default_cwd_writable() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let output = Vm::new().cwd(dir.path()).run(&[
+    "/bin/sh",
+    "-c",
+    "echo -n ok > test-cwd-file && cat test-cwd-file",
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "writing to cwd should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout, "ok", "cwd file should be writable, got: {stdout:?}");
+
+  // Verify the file appeared on the host.
+  let host_content = fs::read_to_string(dir.path().join("test-cwd-file"))
+    .expect("file written by guest should exist on host");
+  assert_eq!(host_content, "ok");
+}
+
+/// Verify that `/tmp` is writable by default.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn default_tmp_writable() {
+  let marker = format!("vmsh-tmp-test-{}", process::id());
+  let output = Vm::new().run(&[
+    "/bin/sh",
+    "-c",
+    &format!("echo -n ok > /tmp/{marker} && cat /tmp/{marker} && rm /tmp/{marker}"),
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "writing to /tmp should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout, "ok", "/tmp should be writable, got: {stdout:?}");
+}
+
+/// Verify that `--share-rw` makes a path writable.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn share_rw_makes_path_writable() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let dir_str = dir.path().to_str().unwrap();
+  let output = Vm::new().arg(&format!("--share-rw={dir_str}")).run(&[
+    "/bin/sh",
+    "-c",
+    &format!("echo -n ok > {dir_str}/test-share && cat {dir_str}/test-share"),
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "--share-rw should make path writable; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout, "ok", "got: {stdout:?}");
+}
+
+
+fn find_populated_dir() -> PathBuf {
+  for candidate in ["/opt", "/usr", "/var", "/srv"] {
+    let p = Path::new(candidate);
+    if p.is_dir() && p.read_dir().is_ok_and(|mut d| d.next().is_some()) {
+      return p.to_path_buf();
+    }
+  }
+  panic!("no non-empty directory found among /opt, /usr, /var, /srv");
+}
+
+/// Verify that `--hide` makes a path invisible.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn hide_path() {
+  let dir = find_populated_dir();
+  let dir_str = dir.display();
+  let output = Vm::new().arg(&format!("--hide={dir_str}")).run(&[
+    "/bin/sh",
+    "-c",
+    &format!("ls {dir_str} 2>&1 | wc -l"),
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "ls should succeed on hidden (empty) path; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "0",
+    "{dir_str} should appear empty when hidden, got: {stdout:?}",
+  );
+}
+
+/// Verify that the guest cannot bypass `--hide` by unmounting.
+///
+/// Since hiding is done in the host mount namespace, the guest has no
+/// mount to undo -- the virtiofs view is already empty.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn hide_path_cannot_be_bypassed() {
+  let dir = find_populated_dir();
+  let dir_str = dir.display();
+  let hide_arg = format!("--hide={dir_str}");
+  let output = Vm::new().arg(&hide_arg).run(&[
+    "/bin/sh",
+    "-c",
+    &format!("umount {dir_str} 2>/dev/null; ls {dir_str} | wc -l"),
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "command should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "0",
+    "{dir_str} should remain empty after umount attempt, got: {stdout:?}",
+  );
+}
+
+/// Verify that `--share-rw /` restores full read-write access.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn share_rw_root_full_access() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let file_path = dir.path().join("rw-root-test.txt");
+  let file_path_str = file_path.to_str().unwrap();
+
+  let output = Vm::new().arg("--share-rw=/").run(&[
+    "/bin/sh",
+    "-c",
+    &format!("echo -n ok > {file_path_str} && cat {file_path_str}"),
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "--share-rw / should grant full write access; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout, "ok", "got: {stdout:?}");
+
+  let host_content =
+    fs::read_to_string(&file_path).expect("file written by guest should exist on host");
+  assert_eq!(host_content, "ok");
+}
+
+/// Verify that `--share-ro` makes a path readable but not writable.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn share_ro_prevents_writes() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let dir_str = dir.path().to_str().unwrap();
+
+  // Write a file on the host so the guest can read it.
+  let marker = "share-ro-test-content";
+  let () = fs::write(dir.path().join("readable.txt"), marker).unwrap();
+
+  let share_arg = format!("--share-ro={dir_str}");
+
+  // Reading should succeed.
+  let output =
+    Vm::new()
+      .arg(&share_arg)
+      .run(&["/bin/sh", "-c", &format!("cat {dir_str}/readable.txt")]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "reading through --share-ro should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout, marker, "got: {stdout:?}");
+
+  // Writing should fail.
+  let output =
+    Vm::new()
+      .arg(&share_arg)
+      .run(&["/bin/sh", "-c", &format!("touch {dir_str}/should-fail")]);
+  assert_ne!(
+    output.status.code(),
+    Some(0),
+    "writing through --share-ro should fail",
   );
 }
