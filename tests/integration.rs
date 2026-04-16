@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::env;
+use std::env::current_dir;
 use std::fs;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -28,6 +29,7 @@ struct Vm {
   kernel: Option<PathBuf>,
   args: Vec<String>,
   env_vars: Vec<(String, String)>,
+  cwd: Option<PathBuf>,
 }
 
 impl Vm {
@@ -37,6 +39,7 @@ impl Vm {
       kernel: None,
       args: Vec::new(),
       env_vars: Vec::new(),
+      cwd: None,
     }
   }
 
@@ -60,6 +63,11 @@ impl Vm {
     self
   }
 
+  fn cwd(mut self, path: &Path) -> Self {
+    self.cwd = Some(path.to_path_buf());
+    self
+  }
+
   fn vmsh_path(&self) -> Cow<'_, Path> {
     self
       .vmsh
@@ -69,15 +77,29 @@ impl Vm {
   }
 
   fn kernel_path(&self) -> Option<Cow<'_, Path>> {
-    if self.kernel.is_some() {
-      return self.kernel.as_deref().map(Cow::Borrowed);
+    fn absolutize<'path, P>(path: P) -> Cow<'path, Path>
+    where
+      Cow<'path, Path>: From<P>,
+    {
+      let path = Cow::from(path);
+      if path.is_relative() {
+        let abs = current_dir().expect("failed to get current dir").join(path);
+        Cow::Owned(abs)
+      } else {
+        path
+      }
     }
-    // Fall back to `VMSH_KERNEL` only when no custom binary is set
-    // (custom binaries may have an embedded kernel).
-    if self.vmsh.is_none() {
-      Some(Cow::Owned(PathBuf::from(
-        env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"),
-      )))
+
+    if self.kernel.is_some() {
+      // Resolve relative paths against the original working directory
+      // (before any `.cwd()` override takes effect).
+      let path = self.kernel.as_deref().unwrap();
+      Some(absolutize(path))
+    } else if self.vmsh.is_none() {
+      // Fall back to `VMSH_KERNEL` only when no custom `vmsh` binary is
+      // set (custom binaries may have an embedded kernel).
+      let path = PathBuf::from(env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"));
+      Some(absolutize(path))
     } else {
       None
     }
@@ -89,10 +111,17 @@ impl Vm {
     }
   }
 
+  fn apply_cwd(&self, cmd: &mut Command) {
+    if let Some(dir) = &self.cwd {
+      cmd.current_dir(dir);
+    }
+  }
+
   /// Run a shell snippet inside the VM via stdin.
   fn run_shell(&self, input: &str) -> Output {
     let mut cmd = Command::new(self.vmsh_path().as_os_str());
     let () = self.apply_env(&mut cmd);
+    let () = self.apply_cwd(&mut cmd);
 
     let _cmd = cmd.args(&self.args);
     if let Some(kernel) = self.kernel_path() {
@@ -114,6 +143,7 @@ impl Vm {
   fn run(&self, args: &[&str]) -> Output {
     let mut cmd = Command::new(self.vmsh_path().as_os_str());
     let () = self.apply_env(&mut cmd);
+    let () = self.apply_cwd(&mut cmd);
 
     let _cmd = cmd.args(&self.args);
     if let Some(kernel) = self.kernel_path() {
