@@ -261,6 +261,100 @@ static void load_env_vars(void) {
   fclose(f);
 }
 
+/* Recursively create directories for a path (like `mkdir -p`). */
+static void mkdir_p_recursive(const char *path) {
+  char buf[4096];
+  size_t len = strlen(path);
+
+  if (len == 0 || len >= sizeof(buf))
+    return;
+  memcpy(buf, path, len + 1);
+
+  for (size_t i = 1; i <= len; i++) {
+    if (buf[i] == '/' || buf[i] == '\0') {
+      char saved = buf[i];
+      buf[i] = '\0';
+      /* Ignore errors: intermediate components may already exist
+       * (EEXIST), matching `mkdir -p` behavior. */
+      mkdir(buf, 0755);
+      buf[i] = saved;
+    }
+  }
+}
+
+/* Mount virtiofs shares specified in VMSH_SHARES.
+ *
+ * Format: tag:path:mode[;tag:path:mode]...
+ * where mode is "rw" or "ro".
+ *
+ * Each entry is mounted at the specified path. Parent directories
+ * are created if needed.
+ */
+static void mount_shares(void) {
+  const char *env = getenv("VMSH_SHARES");
+  if (!env || *env == '\0')
+    return;
+
+  char *spec = strdup(env);
+  if (!spec)
+    return;
+
+  char *saveptr = NULL;
+  char *entry = strtok_r(spec, ";", &saveptr);
+  while (entry) {
+    /* Parse tag:path:mode */
+    char *colon1 = strchr(entry, ':');
+    if (!colon1) {
+      fprintf(stderr, "vmsh-init: warning: malformed share entry: %s\n", entry);
+      entry = strtok_r(NULL, ";", &saveptr);
+      continue;
+    }
+    *colon1 = '\0';
+    char *tag = entry;
+    char *path = colon1 + 1;
+
+    char *colon2 = strchr(path, ':');
+    if (colon2)
+      *colon2 = '\0';
+    /* mode (rw/ro) is informational here; the read-only enforcement
+     * happens at the virtiofs level in libkrun. */
+
+    mkdir_p_recursive(path);
+    int ret = mount(tag, path, "virtiofs", 0, NULL);
+    if (ret < 0)
+      fprintf(stderr, "vmsh-init: warning: mount virtiofs %s on %s: %s\n",
+              tag, path, strerror(errno));
+
+    entry = strtok_r(NULL, ";", &saveptr);
+  }
+  free(spec);
+}
+
+/* Hide paths specified in VMSH_HIDE by mounting empty tmpfs over them.
+ *
+ * Format: path[;path]...
+ */
+static void hide_paths(void) {
+  const char *env = getenv("VMSH_HIDE");
+  if (!env || *env == '\0')
+    return;
+
+  char *spec = strdup(env);
+  if (!spec)
+    return;
+
+  char *saveptr = NULL;
+  char *path = strtok_r(spec, ";", &saveptr);
+  while (path) {
+    int ret = mount("tmpfs", path, "tmpfs", 0, "size=0");
+    if (ret < 0)
+      fprintf(stderr, "vmsh-init: warning: hide %s: %s\n",
+              path, strerror(errno));
+    path = strtok_r(NULL, ";", &saveptr);
+  }
+  free(spec);
+}
+
 static void set_exit_code(int code) {
   struct statfs buf;
 
@@ -352,11 +446,6 @@ static void do_exec(const char *exec_path, char **exec_argv) {
 }
 
 int main(int argc, char *argv[]) {
-  /* Remove our own binary from the filesystem now that we are running. We do
-   * that because on the happy path the host code won't have a chance, because
-   * libkrun exits the process hard on VM exit. */
-  unlink(argv[0]);
-
   /* Set up shared mount propagation on root. */
   mount_or_warn(NULL, "/", NULL, MS_REC | MS_SHARED, "shared propagation on /");
 
@@ -386,7 +475,23 @@ int main(int argc, char *argv[]) {
 
   /* Bring up loopback interface. */
   bring_up_loopback();
+
+  /* Mount virtiofs shares first so that /tmp (and other paths) become
+   * writable. This must happen before unlink/load_env_vars, because the
+   * root filesystem may be read-only and those files live in /tmp. */
+  mount_shares();
+
+  /* Remove our own binary now that rw shares are mounted. We must do
+   * this on the guest side because libkrun exits the host process hard
+   * on VM exit, so the host-side RAII cleanup never runs. */
+  unlink(argv[0]);
+
+  /* Load environment variables from the virtio console port. */
   load_env_vars();
+
+  /* Hide paths after loading env (in case the env file sits under a
+   * path that will be hidden). */
+  hide_paths();
 
   /* Set hostname. */
   const char *hostname = getenv("HOSTNAME");
