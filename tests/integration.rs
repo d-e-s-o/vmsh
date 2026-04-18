@@ -44,12 +44,12 @@ impl Vm {
   }
 
   fn arg(mut self, arg: &str) -> Self {
-    self.args.push(arg.to_string());
+    let () = self.args.push(arg.to_string());
     self
   }
 
   fn env(mut self, key: &str, value: &str) -> Self {
-    self.env_vars.push((key.to_string(), value.to_string()));
+    let () = self.env_vars.push((key.to_string(), value.to_string()));
     self
   }
 
@@ -699,7 +699,7 @@ fn network_tcp_connection() {
 
   // With --net, TCP connect should succeed.
   let handle = spawn(move || {
-    listener.set_nonblocking(false).unwrap();
+    let () = listener.set_nonblocking(false).unwrap();
     let (mut conn, _addr) = listener.accept().expect("accept failed");
     let mut buf = [0u8; 256];
     let n = conn.read(&mut buf).expect("read failed");

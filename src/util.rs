@@ -2,6 +2,7 @@ use std::fs::File;
 use std::io::Read as _;
 use std::path::Path;
 
+use anyhow::bail;
 use anyhow::Context as _;
 use anyhow::Result;
 
@@ -34,7 +35,7 @@ pub fn detect_kernel_format(path: &Path) -> Result<KernelFormat> {
     [0x1f, 0x8b, ..] => KernelFormat::Gz,
     [b'B', b'Z', b'h', _] => KernelFormat::Bz2,
     [0x28, 0xb5, 0x2f, 0xfd] => KernelFormat::Zstd,
-    _ => anyhow::bail!(
+    _ => bail!(
       "unrecognized kernel format (magic: {magic:02x?}) for `{}`",
       path.display()
     ),
