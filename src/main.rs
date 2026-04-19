@@ -1,6 +1,7 @@
 //! Transparently run a shell (or other binary) in a VM.
 
 mod args;
+mod embed;
 
 use std::cell::LazyCell;
 use std::collections::BTreeMap;
@@ -37,6 +38,8 @@ use clap::Parser;
 use vmsh::detect_kernel_format;
 
 use crate::args::Args;
+use crate::args::Command;
+use crate::args::RunArgs;
 
 
 /// Embedded init binary.
@@ -266,8 +269,8 @@ fn set_exec(
 }
 
 
-fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
-  let Args {
+fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Result<()> {
+  let RunArgs {
     kernel,
     cpus,
     memory,
@@ -278,6 +281,9 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     all_envs,
     verbosity,
   } = args;
+
+  // SANITY: Caller guarantees that a kernel is always set.
+  let kernel = kernel.unwrap();
 
   if verbosity > 0 {
     // SAFETY: `STDERR_FILENO` is a valid file descriptor.
@@ -371,7 +377,7 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     };
     ensure!(rc >= 0, "failed to add env console port");
   }
-  let () = set_exec(ctx, command, has_env_port, &[init_guest_path])?;
+  let () = set_exec(ctx, command, has_env_port, unlink_paths)?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");
@@ -403,11 +409,32 @@ fn set_rlimits() -> Result<()> {
 fn main() -> Result<()> {
   let args = Args::parse();
 
-  ensure!(
-    args.kernel.exists(),
-    "failed to find kernel at `{}`",
-    args.kernel.display()
-  );
+  let mut args = match args.command {
+    Some(Command::Embed(embed_args)) => {
+      return embed::embed_kernel(&embed_args.kernel, embed_args.output.as_deref());
+    },
+    Some(Command::Run(run_args)) => run_args,
+    None => args.args,
+  };
+
+  // Resolve kernel: explicit positional arg > embedded > error.
+  let kernel_guard;
+  let extracted_kernel = match &mut args.kernel {
+    Some(path) => {
+      ensure!(
+        path.exists(),
+        "failed to find kernel at `{}`",
+        path.display()
+      );
+      None
+    },
+    None => {
+      kernel_guard = embed::extract_embedded_kernel()
+        .context("no kernel specified and no embedded kernel found")?;
+      args.kernel = Some(kernel_guard.to_path_buf());
+      Some(&*kernel_guard)
+    },
+  };
 
   let () = set_rlimits()?;
 
@@ -417,7 +444,13 @@ fn main() -> Result<()> {
   let init_path = temp_dir().join(&init_filename);
   let _guard = deploy_init_binary(&init_path)?;
 
-  let () = exec_vm(args, &init_path)?;
+  // Collect temporary files for the guest init to clean up.
+  let mut unlink_paths = vec![init_path.as_path()];
+  if let Some(kernel_path) = extracted_kernel {
+    let () = unlink_paths.push(kernel_path);
+  }
+
+  let () = exec_vm(args, &init_path, &unlink_paths)?;
   Ok(())
 }
 

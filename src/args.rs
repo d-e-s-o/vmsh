@@ -2,17 +2,39 @@ use std::path::PathBuf;
 
 use clap::ArgAction;
 use clap::Parser;
+use clap::Subcommand;
 
 
 /// Transparently run a shell (or other binary) in a VM.
 #[derive(Debug, Parser)]
-#[clap(version = env!("VERSION"))]
+#[clap(version = env!("VERSION"), args_conflicts_with_subcommands = true)]
 pub struct Args {
+  #[clap(subcommand)]
+  pub command: Option<Command>,
+  #[clap(flatten)]
+  pub args: RunArgs,
+}
+
+
+/// Available subcommands.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+  /// Run a command in a VM (default).
+  Run(RunArgs),
+  /// Embed a kernel image into a copy of this binary.
+  Embed(EmbedArgs),
+}
+
+
+/// Arguments for the default `run` subcommand.
+#[derive(Debug, Parser)]
+pub struct RunArgs {
   /// Path to the kernel vmlinux.
   ///
-  /// The image can optionally be gzip, bzip, or zstd compressed.
+  /// The image can optionally be gzip, bzip, or zstd compressed. When
+  /// omitted, the embedded kernel is used (see `vmsh embed`).
   #[clap(short, long)]
-  pub kernel: PathBuf,
+  pub kernel: Option<PathBuf>,
   /// Number of vCPUs present in the VM.
   #[clap(long, default_value_t = 2)]
   pub cpus: u8,
@@ -47,4 +69,17 @@ pub struct Args {
   /// Increase verbosity (can be supplied multiple times).
   #[clap(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
   pub verbosity: u8,
+}
+
+
+/// Arguments for the `embed` subcommand.
+#[derive(Debug, Parser)]
+pub struct EmbedArgs {
+  /// Path to the kernel image to embed.
+  pub kernel: PathBuf,
+  /// Output path for the new binary.
+  ///
+  /// Defaults to overwriting the current executable in place.
+  #[clap(short, long)]
+  pub output: Option<PathBuf>,
 }

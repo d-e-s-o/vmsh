@@ -24,6 +24,7 @@ use vmsh::KernelFormat;
 
 /// Builder for running commands inside a VM.
 struct Vm {
+  vmsh: Option<PathBuf>,
   kernel: Option<PathBuf>,
   args: Vec<String>,
   env_vars: Vec<(String, String)>,
@@ -32,10 +33,16 @@ struct Vm {
 impl Vm {
   fn new() -> Self {
     Self {
+      vmsh: None,
       kernel: None,
       args: Vec::new(),
       env_vars: Vec::new(),
     }
+  }
+
+  fn vmsh(mut self, path: &Path) -> Self {
+    self.vmsh = Some(path.to_path_buf());
+    self
   }
 
   fn kernel(mut self, path: &Path) -> Self {
@@ -53,16 +60,27 @@ impl Vm {
     self
   }
 
-  fn kernel_path(&self) -> Cow<'_, Path> {
+  fn vmsh_path(&self) -> Cow<'_, Path> {
     self
-      .kernel
+      .vmsh
       .as_deref()
       .map(Cow::Borrowed)
-      .unwrap_or_else(|| {
-        Cow::Owned(PathBuf::from(
-          env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"),
-        ))
-      })
+      .unwrap_or_else(|| Cow::Borrowed(Path::new(env!("CARGO_BIN_EXE_vmsh"))))
+  }
+
+  fn kernel_path(&self) -> Option<Cow<'_, Path>> {
+    if self.kernel.is_some() {
+      return self.kernel.as_deref().map(Cow::Borrowed);
+    }
+    // Fall back to `VMSH_KERNEL` only when no custom binary is set
+    // (custom binaries may have an embedded kernel).
+    if self.vmsh.is_none() {
+      Some(Cow::Owned(PathBuf::from(
+        env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"),
+      )))
+    } else {
+      None
+    }
   }
 
   fn apply_env(&self, cmd: &mut Command) {
@@ -73,13 +91,14 @@ impl Vm {
 
   /// Run a shell snippet inside the VM via stdin.
   fn run_shell(&self, input: &str) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vmsh"));
+    let mut cmd = Command::new(self.vmsh_path().as_os_str());
     let () = self.apply_env(&mut cmd);
 
+    let _cmd = cmd.args(&self.args);
+    if let Some(kernel) = self.kernel_path() {
+      let _cmd = cmd.arg("--kernel").arg(kernel.as_os_str());
+    }
     cmd
-      .args(&self.args)
-      .arg("--kernel")
-      .arg(self.kernel_path().as_os_str())
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::piped())
@@ -93,13 +112,14 @@ impl Vm {
 
   /// Run a command inside the VM via `-- cmd args...`.
   fn run(&self, args: &[&str]) -> Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_vmsh"));
+    let mut cmd = Command::new(self.vmsh_path().as_os_str());
     let () = self.apply_env(&mut cmd);
 
+    let _cmd = cmd.args(&self.args);
+    if let Some(kernel) = self.kernel_path() {
+      let _cmd = cmd.arg("--kernel").arg(kernel.as_os_str());
+    }
     cmd
-      .args(&self.args)
-      .arg("--kernel")
-      .arg(self.kernel_path().as_os_str())
       .arg("--")
       .args(args)
       .stdin(Stdio::piped())
@@ -767,5 +787,187 @@ fn uds_connection() {
   assert_eq!(
     received, "vmsh-uds-test",
     "host should receive data sent from guest via UDS TSI, got: {received:?}",
+  );
+}
+
+
+/// Helper to create a fat `vmsh` binary with a kernel embedded.
+fn embed_kernel(kernel: &Path, output: &Path) {
+  let result = Command::new(env!("CARGO_BIN_EXE_vmsh"))
+    .arg("embed")
+    .arg(kernel)
+    .arg("-o")
+    .arg(output)
+    .stderr(Stdio::piped())
+    .output()
+    .expect("failed to run vmsh embed");
+  let stderr = String::from_utf8_lossy(&result.stderr);
+  assert!(
+    result.status.success(),
+    "vmsh embed should succeed; stderr:\n{stderr}",
+  );
+}
+
+
+/// Test embedding a kernel and booting the fat binary without a kernel
+/// argument.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn embed_and_boot() {
+  let kernel = PathBuf::from(env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"));
+  let dir = TempDir::new().expect("failed to create temp dir");
+  let fat = dir.path().join("vmsh-fat");
+  let () = embed_kernel(&kernel, &fat);
+
+  let output = Vm::new().vmsh(&fat).run(&["/bin/echo", "embedded-ok"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "fat binary should boot with embedded kernel; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "embedded-ok\n",
+    "stdout should be 'embedded-ok\\n', got: {stdout:?}",
+  );
+}
+
+/// Check that a fat binary with an embedded kernel still accepts an
+/// explicit kernel argument (which takes precedence).
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn embed_kernel_override() {
+  let kernel = PathBuf::from(env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"));
+  let dir = TempDir::new().expect("failed to create temp dir");
+  let fat = dir.path().join("vmsh-fat");
+  let () = embed_kernel(&kernel, &fat);
+
+  let output = Vm::new()
+    .vmsh(&fat)
+    .kernel(&kernel)
+    .run(&["/bin/echo", "override-ok"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "explicit kernel should override embedded; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "override-ok\n",
+    "stdout should be 'override-ok\\n', got: {stdout:?}",
+  );
+}
+
+/// Make sure that re-embedding replaces the old kernel and still boots.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn embed_re_embed() {
+  let kernel = PathBuf::from(env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"));
+  let dir = TempDir::new().expect("failed to create temp dir");
+  let fat = dir.path().join("vmsh-fat");
+  let () = embed_kernel(&kernel, &fat);
+
+  let size_first = fs::metadata(&fat).unwrap().len();
+
+  // Re-embed using the fat binary, writing to a new file (the running
+  // binary cannot overwrite itself due to `ETXTBSY`).
+  let fat2 = dir.path().join("vmsh-fat2");
+  let result = Command::new(&fat)
+    .arg("embed")
+    .arg(&kernel)
+    .arg("-o")
+    .arg(&fat2)
+    .stderr(Stdio::piped())
+    .output()
+    .expect("failed to run re-embed");
+  let stderr = String::from_utf8_lossy(&result.stderr);
+  assert!(
+    result.status.success(),
+    "re-embed should succeed; stderr:\n{stderr}"
+  );
+
+  let size_second = fs::metadata(&fat2).unwrap().len();
+  assert_eq!(
+    size_first, size_second,
+    "re-embedding the same kernel should produce the same size ({size_first} vs {size_second})",
+  );
+
+  // Verify it still boots.
+  let output = Vm::new().vmsh(&fat2).run(&["/bin/echo", "re-embed-ok"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "re-embedded binary should boot; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "re-embed-ok\n",
+    "stdout should be 're-embed-ok\\n', got: {stdout:?}",
+  );
+}
+
+/// Test that `vmsh embed kernel` (no `-o`) works by overwriting itself
+/// via the copy & re-exec dance.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn embed_self_overwrite() {
+  let kernel = PathBuf::from(env::var("VMSH_KERNEL").expect("VMSH_KERNEL must be set"));
+  let dir = TempDir::new().expect("failed to create temp dir");
+  let fat = dir.path().join("vmsh-fat");
+  let _cnt = fs::copy(env!("CARGO_BIN_EXE_vmsh"), &fat).expect("failed to copy vmsh");
+
+  // Embed without `-o` -- the binary should overwrite itself.
+  let result = Command::new(&fat)
+    .arg("embed")
+    .arg(&kernel)
+    .stderr(Stdio::piped())
+    .output()
+    .expect("failed to run vmsh embed");
+  let stderr = String::from_utf8_lossy(&result.stderr);
+  assert!(
+    result.status.success(),
+    "embed self-overwrite should succeed; stderr:\n{stderr}",
+  );
+
+  // Verify the fat binary boots with its embedded kernel.
+  let output = Vm::new().vmsh(&fat).run(&["/bin/echo", "self-ok"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "self-overwritten fat binary should boot; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout, "self-ok\n",
+    "stdout should be 'self-ok\\n', got: {stdout:?}",
+  );
+}
+
+/// Verify that invoking `vmsh` without a kernel and without an embedded
+/// kernel fails with a meaningful error.
+#[test]
+fn no_kernel_no_embed_errors() {
+  let output = Command::new(env!("CARGO_BIN_EXE_vmsh"))
+    .arg("--")
+    .args(["/bin/true"])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped())
+    .spawn()
+    .and_then(Child::wait_with_output)
+    .expect("failed to run vmsh");
+  assert_ne!(
+    output.status.code(),
+    Some(0),
+    "vmsh without kernel should fail",
+  );
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert!(
+    stderr.contains("no kernel specified") || stderr.contains("no embedded kernel"),
+    "error should mention missing kernel, got: {stderr:?}",
   );
 }
