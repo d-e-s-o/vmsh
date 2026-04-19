@@ -11,6 +11,7 @@ pub struct Args {
   /// Path to the kernel vmlinux.
   ///
   /// The image can optionally be gzip, bzip, or zstd compressed.
+  #[clap(short, long)]
   pub kernel: PathBuf,
   /// Number of vCPUs present in the VM.
   #[clap(long, default_value_t = 2)]

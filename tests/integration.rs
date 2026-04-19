@@ -78,6 +78,7 @@ impl Vm {
 
     cmd
       .args(&self.args)
+      .arg("--kernel")
       .arg(self.kernel_path().as_os_str())
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
@@ -97,6 +98,7 @@ impl Vm {
 
     cmd
       .args(&self.args)
+      .arg("--kernel")
       .arg(self.kernel_path().as_os_str())
       .arg("--")
       .args(args)

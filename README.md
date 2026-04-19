@@ -16,14 +16,14 @@ host kernel.
 
 ```sh
 # Start an interactive shell in a VM.
-$ vmsh <vmlinux>
+$ vmsh --kernel <vmlinux>
 
 # Run a specific command
-$ vmsh <vmlinux> -- echo "hello from a VM".
+$ vmsh -k <vmlinux> -- echo "hello from a VM".
 > hello from a VM
 
 # Forward all environment variables.
-$ vmsh --all-envs <vmlinux> -- make -j4
+$ vmsh --all-envs -k <vmlinux> -- make -j4
 ```
 
 
