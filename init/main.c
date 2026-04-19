@@ -351,11 +351,28 @@ static void do_exec(const char *exec_path, char **exec_argv) {
   _exit(code);
 }
 
+/* Delete colon-separated paths listed in VMSH_UNLINK. */
+static void unlink_temp_files(void) {
+  const char *list = getenv("VMSH_UNLINK");
+  if (!list)
+    return;
+
+  char *buf = strdup(list);
+  if (!buf)
+    return;
+
+  char *saveptr = NULL;
+  for (char *path = strtok_r(buf, ":", &saveptr); path;
+       path = strtok_r(NULL, ":", &saveptr)) {
+    unlink(path);
+  }
+  free(buf);
+}
+
 int main(int argc, char *argv[]) {
-  /* Remove our own binary from the filesystem now that we are running. We do
-   * that because on the happy path the host code won't have a chance, because
-   * libkrun exits the process hard on VM exit. */
-  unlink(argv[0]);
+  /* Remove temporary files early -- the host code won't get a chance
+   * because libkrun exits the process hard on VM exit. */
+  unlink_temp_files();
 
   /* Set up shared mount propagation on root. */
   mount_or_warn(NULL, "/", NULL, MS_REC | MS_SHARED, "shared propagation on /");

@@ -178,7 +178,12 @@ fn set_kernel(ctx: u32, kernel: PathBuf, init_guest_path: &Path, verbosity: u8) 
 }
 
 
-fn set_exec(ctx: u32, command: Vec<String>, has_env_port: bool) -> Result<()> {
+fn set_exec(
+  ctx: u32,
+  command: Vec<String>,
+  has_env_port: bool,
+  unlink_paths: &[&Path],
+) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values (present on the env port).
   let hostname = c"HOSTNAME=krun-boot";
@@ -195,6 +200,22 @@ fn set_exec(ctx: u32, command: Vec<String>, has_env_port: bool) -> Result<()> {
   let stderr_redir = unsafe { libc::isatty(libc::STDERR_FILENO) == 0 };
 
   let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr()];
+
+  // Tell the guest init which temporary files to unlink. libkrun exits
+  // the process hard on VM exit, bypassing host-side RAII cleanup.
+  let unlink_env = if !unlink_paths.is_empty() {
+    let value = unlink_paths
+      .iter()
+      .map(|p| p.display().to_string())
+      .collect::<Vec<_>>()
+      .join(":");
+    Some(CString::new(format!("VMSH_UNLINK={value}"))?)
+  } else {
+    None
+  };
+  if let Some(ref env) = unlink_env {
+    let () = env_ptrs.push(env.as_ptr());
+  }
 
   // Tell the guest init to look for a "krun-env" virtio console port.
   let env_port_env = c"VMSH_ENV_PORT=1";
@@ -350,7 +371,7 @@ fn exec_vm(args: Args, init_guest_path: &Path) -> Result<()> {
     };
     ensure!(rc >= 0, "failed to add env console port");
   }
-  let () = set_exec(ctx, command, has_env_port)?;
+  let () = set_exec(ctx, command, has_env_port, &[init_guest_path])?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");
