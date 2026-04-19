@@ -35,11 +35,11 @@ Requirements
 - A Linux kernel image in vmlinux (ELF) format, optionally compressed
   with gzip, bzip2, or zstd
 
-Minimal kernel images are available as artifacts present on [CI
-runs](https://github.com/d-e-s-o/vmsh/actions/workflows/test.yml), but
-you can compile a kernel from scratch as well. When building your own
-kernel, you will likely want at least the following options enabled (on
-top of basic ones such as `PROC_FS`, `SYSFS`, etc., of course):
+Minimal kernel images are available as artifacts present on on-demand
+[CI runs](https://github.com/d-e-s-o/vmsh/actions/workflows/build-kernel.yml),
+but you can compile a kernel from scratch as well. When building your
+own kernel, you will likely want at least the following options enabled
+(on top of basic ones such as `PROC_FS`, `SYSFS`, etc., of course):
 
 - `CONFIG_HYPERVISOR_GUEST`, `CONFIG_KVM_GUEST`, `CONFIG_PARAVIRT` --
   KVM guest support

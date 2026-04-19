@@ -1,0 +1,23 @@
+name: Build kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build kernel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: d-e-s-o/build-linux@a2c2581c6b44879b6070699618be648480a122c5
+        with:
+          rev: 'v6.18'
+          config: 'var/linux-config-minimal'
+          vmlinux: 'true'
+          patches: |
+            var/linux-patches/6.18-*
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-kernel
+          path: build/boot/vmlinux-*
+          if-no-files-found: error
