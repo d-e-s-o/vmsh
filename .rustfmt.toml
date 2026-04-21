@@ -1,5 +1,5 @@
 blank_lines_upper_bound = 2
-edition = "2021"
+edition = "2024"
 imports_granularity = "item"
 imports_layout = "Vertical"
 match_block_trailing_comma = true

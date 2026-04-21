@@ -2,9 +2,9 @@ use std::fs::File;
 use std::io::Read as _;
 use std::path::Path;
 
-use anyhow::bail;
 use anyhow::Context as _;
 use anyhow::Result;
+use anyhow::bail;
 
 
 /// Kernel image format, with discriminant values matching the `libkrun`

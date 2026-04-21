@@ -18,9 +18,9 @@ use std::path::PathBuf;
 use std::process;
 use std::process::Command;
 
-use anyhow::ensure;
 use anyhow::Context as _;
 use anyhow::Result;
+use anyhow::ensure;
 
 use crate::CleanupGuard;
 

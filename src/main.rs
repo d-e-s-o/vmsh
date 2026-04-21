@@ -8,13 +8,13 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
 use std::env::temp_dir;
-use std::ffi::c_char;
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::ffi::OsString;
+use std::ffi::c_char;
+use std::fs::File;
 use std::fs::remove_file;
 use std::fs::write;
-use std::fs::File;
 use std::io::Seek as _;
 use std::io::Write as _;
 use std::mem::MaybeUninit;
@@ -29,9 +29,9 @@ use std::path::PathBuf;
 use std::process;
 use std::ptr;
 
-use anyhow::ensure;
 use anyhow::Context as _;
 use anyhow::Result;
+use anyhow::ensure;
 
 use clap::Parser;
 
