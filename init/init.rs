@@ -523,29 +523,6 @@ fn mount_shares() {
   }
 }
 
-/// Hide paths specified in `VMSH_HIDE` by mounting empty tmpfs over them.
-///
-/// Format: `path[;path]...`
-fn hide_paths() {
-  let spec = match env::var_os("VMSH_HIDE") {
-    Some(s) if !s.is_empty() => s,
-    _ => return,
-  };
-
-  for path_bytes in spec.as_bytes().split(|&b| b == b';') {
-    let c_path = match CString::new(path_bytes) {
-      Ok(s) => s,
-      Err(_) => continue,
-    };
-    let ret = unsafe { mount(c"tmpfs".as_ptr(), c_path.as_ptr(), c"tmpfs".as_ptr(), 0, c"size=0".as_ptr().cast()) };
-    if ret < 0 {
-      let err = io::Error::last_os_error();
-      let path = Path::new(OsStr::from_bytes(path_bytes));
-      eprintln!("vmsh-init: warning: hide {}: {err}", path.display());
-    }
-  }
-}
-
 
 /// Delete colon-separated paths listed in `VMSH_UNLINK`.
 fn unlink_temp_files() {
@@ -622,10 +599,6 @@ fn main() {
 
   // Load environment variables from the virtio console port.
   let () = load_env_vars();
-
-  // Hide paths after loading env (in case the env file sits under a
-  // path that will be hidden).
-  let () = hide_paths();
 
   // Set hostname.
   let hostname = env::var_os("HOSTNAME").unwrap_or_else(|| OsString::from("localhost"));

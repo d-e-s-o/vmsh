@@ -22,6 +22,15 @@ fn parse_absolute_path(s: &str) -> Result<PathBuf> {
 }
 
 
+fn parse_directory_path(s: &str) -> Result<PathBuf> {
+  let p = parse_absolute_path(s)?;
+  if !p.is_dir() {
+    anyhow::bail!("path `{}` is not a directory", p.display());
+  }
+  Ok(p)
+}
+
+
 /// Transparently run a shell (or other binary) in a VM.
 #[derive(Debug, Parser)]
 #[clap(version = env!("VERSION"), args_conflicts_with_subcommands = true)]
@@ -101,11 +110,12 @@ pub struct RunArgs {
   /// enforcement beyond what the read-only root already provides.
   #[clap(long, value_parser = parse_absolute_path)]
   pub share_ro: Vec<PathBuf>,
-  /// Hide a host path from the guest by mounting an empty tmpfs over it.
+  /// Hide a host directory from the guest.
   ///
-  /// This prevents the guest from reading the path's contents.
-  /// The underlying data remains protected by the read-only root.
-  #[clap(long, value_parser = parse_absolute_path)]
+  /// The directory is hidden by overlaying an empty tmpfs in the host
+  /// mount namespace, so the guest cannot bypass it. The path must be
+  /// an existing directory.
+  #[clap(long, value_parser = parse_directory_path)]
   pub hide: Vec<PathBuf>,
 }
 

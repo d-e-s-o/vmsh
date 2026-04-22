@@ -1131,6 +1131,30 @@ fn hide_path() {
   );
 }
 
+/// Verify that the guest cannot bypass `--hide` by unmounting.
+///
+/// Since hiding is done in the host mount namespace, the guest has no
+/// mount to undo — the virtiofs view is already empty.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn hide_path_cannot_be_bypassed() {
+  let output = Vm::new()
+    .arg("--hide=/opt")
+    .run(&["/bin/sh", "-c", "umount /opt 2>/dev/null; ls /opt | wc -l"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "command should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "0",
+    "/opt should remain empty after umount attempt, got: {stdout:?}",
+  );
+}
+
 /// Verify exit code propagation with read-only root.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]

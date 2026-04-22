@@ -52,7 +52,8 @@ enum ShareAction {
   /// needed for explicit `--share-ro` requests; the default read-only
   /// root already covers most paths.
   ReadOnly,
-  /// Hide the path by mounting an empty tmpfs over it in the guest.
+  /// Hide the path by overlaying an empty tmpfs in the host mount
+  /// namespace, so the guest cannot bypass it.
   Hide,
 }
 
@@ -156,21 +157,54 @@ fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
 }
 
 
-/// Format hide list as an environment variable value.
+/// Enter a user + mount namespace and hide the given paths.
 ///
-/// Format: `path[;path]...`
-fn format_hide_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
-  let mut out = Vec::new();
-  for (path, action) in shares {
-    if !matches!(action, ShareAction::Hide) {
-      continue;
-    }
-    if !out.is_empty() {
-      out.push(b';');
-    }
-    out.extend_from_slice(path.as_os_str().as_bytes());
+/// Creates a new user namespace (to avoid requiring root) and a new
+/// mount namespace, then mounts empty tmpfs over each path. The
+/// virtiofs daemon in libkrun inherits this namespace, so the guest
+/// cannot see the hidden paths.
+fn enter_hiding_namespace(paths: &[PathBuf]) -> Result<()> {
+  // SAFETY: `getuid` and `getgid` are always safe.
+  let uid = unsafe { libc::getuid() };
+  let gid = unsafe { libc::getgid() };
+
+  // SAFETY: `unshare` is safe to call.
+  let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) };
+  if rc < 0 {
+    let err = std::io::Error::last_os_error();
+    anyhow::bail!(
+      "failed to create user/mount namespace for --hide: {err}\n\
+       hint: check `sysctl kernel.unprivileged_userns_clone` or run with CAP_SYS_ADMIN"
+    );
   }
-  out
+
+  // Set up identity UID/GID mappings so file access semantics are preserved.
+  write("/proc/self/setgroups", "deny").context("failed to write /proc/self/setgroups")?;
+  write("/proc/self/uid_map", format!("{uid} {uid} 1"))
+    .context("failed to write /proc/self/uid_map")?;
+  write("/proc/self/gid_map", format!("{gid} {gid} 1"))
+    .context("failed to write /proc/self/gid_map")?;
+
+  // Prevent mount events from propagating back to the parent namespace.
+  // SAFETY: "/" is a valid path, no data argument needed for remount.
+  let rc = unsafe { libc::mount(ptr::null(), c"/".as_ptr(), ptr::null(), libc::MS_REC | libc::MS_PRIVATE, ptr::null()) };
+  ensure!(rc == 0, "failed to make mounts private: {}", std::io::Error::last_os_error());
+
+  for path in paths {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: All arguments are valid NUL-terminated strings.
+    let rc = unsafe {
+      libc::mount(c"tmpfs".as_ptr(), c_path.as_ptr(), c"tmpfs".as_ptr(), 0, c"size=0".as_ptr().cast())
+    };
+    ensure!(
+      rc == 0,
+      "failed to mount tmpfs over `{}`: {}",
+      path.display(),
+      std::io::Error::last_os_error()
+    );
+  }
+
+  Ok(())
 }
 
 
@@ -324,7 +358,6 @@ fn set_exec(
   has_env_port: bool,
   unlink_paths: &[&Path],
   shares_env: Option<&[u8]>,
-  hide_env: Option<&[u8]>,
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values (present on the env port).
@@ -381,14 +414,6 @@ fn set_exec(
     let () = buf.extend_from_slice(val);
     shares_env_cstr = CString::new(buf)?;
     let () = env_ptrs.push(shares_env_cstr.as_ptr());
-  }
-
-  let hide_env_cstr;
-  if let Some(val) = hide_env {
-    let mut buf = b"VMSH_HIDE=".to_vec();
-    let () = buf.extend_from_slice(val);
-    hide_env_cstr = CString::new(buf)?;
-    let () = env_ptrs.push(hide_env_cstr.as_ptr());
   }
 
   let () = env_ptrs.push(ptr::null());
@@ -509,6 +534,27 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     .context("failed to determine current directory")?;
   let (shares, root_read_only) = compute_shares(&cwd, &share_rw, &share_ro, &hide);
 
+  // Hide paths by overlaying empty tmpfs in a new mount namespace.
+  // Must happen before virtiofs setup so the daemon inherits the view.
+  let hide_paths: Vec<PathBuf> = shares
+    .iter()
+    .filter(|(_, a)| matches!(a, ShareAction::Hide))
+    .map(|(p, _)| p.clone())
+    .collect();
+  if !hide_paths.is_empty() {
+    for path in &hide_paths {
+      for &upath in unlink_paths {
+        ensure!(
+          !upath.starts_with(path),
+          "`--hide {}` would hide `{}`",
+          path.display(),
+          upath.display()
+        );
+      }
+    }
+    enter_hiding_namespace(&hide_paths)?;
+  }
+
   // Set up the root filesystem via the well-known root virtiofs tag.
   // By default the root is read-only; `--share-rw /` makes it rw.
   let c_rootfs = c"/";
@@ -585,18 +631,12 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     ensure!(rc >= 0, "failed to add env console port");
   }
 
-  // Build share and hide metadata for the guest init.
+  // Build share metadata for the guest init.
   let shares_env_val = format_shares_env(&shares);
   let shares_env = if shares_env_val.is_empty() {
     None
   } else {
     Some(shares_env_val.as_slice())
-  };
-  let hide_env_val = format_hide_env(&shares);
-  let hide_env = if hide_env_val.is_empty() {
-    None
-  } else {
-    Some(hide_env_val.as_slice())
   };
 
   let () = set_exec(
@@ -605,7 +645,6 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     has_env_port,
     unlink_paths,
     shares_env,
-    hide_env,
   )?;
 
   let rc = krun::krun_start_enter(ctx);
@@ -907,19 +946,7 @@ mod tests {
     );
   }
 
-  /// Verify the `VMSH_HIDE` env var format.
-  #[test]
-  fn hide_metadata_format() {
-    let shares = vec![
-      (PathBuf::from("/home/user/project"), ShareAction::ReadWrite),
-      (PathBuf::from("/secret"), ShareAction::Hide),
-      (PathBuf::from("/other"), ShareAction::Hide),
-    ];
-    let env = format_hide_env(&shares);
-    assert_eq!(env, b"/secret;/other");
-  }
-
-  /// Non-UTF-8 path bytes survive the share/hide encoding round-trip.
+  /// Non-UTF-8 path bytes survive the share encoding round-trip.
   #[test]
   fn non_utf8_paths() {
     // 0x80 is not valid UTF-8 on its own.
@@ -935,8 +962,5 @@ mod tests {
 
     let env = format_shares_env(&shares);
     assert_eq!(env, b"vmsh-0:/rw-\x80:rw;vmsh-1:/ro-\x80:ro");
-
-    let env = format_hide_env(&shares);
-    assert_eq!(env, b"/hide-\x80");
   }
 }
