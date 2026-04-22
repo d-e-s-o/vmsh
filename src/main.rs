@@ -133,34 +133,44 @@ fn compute_shares(
 ///
 /// Format: `tag:path:mode[;tag:path:mode]...`
 /// where mode is `rw` or `ro`.
-fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> String {
-  shares
-    .iter()
-    .filter(|(_, a)| matches!(a, ShareAction::ReadWrite | ShareAction::ReadOnly))
-    .enumerate()
-    .map(|(i, (path, action))| {
-      let mode = match action {
-        ShareAction::ReadWrite => "rw",
-        ShareAction::ReadOnly => "ro",
-        ShareAction::Hide => unreachable!(),
-      };
-      format!("vmsh-{i}:{}:{mode}", path.display())
-    })
-    .collect::<Vec<_>>()
-    .join(";")
+fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
+  let mut out = Vec::new();
+  let mut idx = 0usize;
+  for (path, action) in shares {
+    let mode = match action {
+      ShareAction::ReadWrite => &b"rw"[..],
+      ShareAction::ReadOnly => &b"ro"[..],
+      ShareAction::Hide => continue,
+    };
+    if !out.is_empty() {
+      out.push(b';');
+    }
+    out.extend_from_slice(format!("vmsh-{idx}").as_bytes());
+    out.push(b':');
+    out.extend_from_slice(path.as_os_str().as_bytes());
+    out.push(b':');
+    out.extend_from_slice(mode);
+    idx += 1;
+  }
+  out
 }
 
 
 /// Format hide list as an environment variable value.
 ///
 /// Format: `path[;path]...`
-fn format_hide_env(shares: &[(PathBuf, ShareAction)]) -> String {
-  shares
-    .iter()
-    .filter(|(_, a)| matches!(a, ShareAction::Hide))
-    .map(|(path, _)| format!("{}", path.display()))
-    .collect::<Vec<_>>()
-    .join(";")
+fn format_hide_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
+  let mut out = Vec::new();
+  for (path, action) in shares {
+    if !matches!(action, ShareAction::Hide) {
+      continue;
+    }
+    if !out.is_empty() {
+      out.push(b';');
+    }
+    out.extend_from_slice(path.as_os_str().as_bytes());
+  }
+  out
 }
 
 
@@ -313,8 +323,8 @@ fn set_exec(
   command: Vec<String>,
   has_env_port: bool,
   unlink_paths: &[&Path],
-  shares_env: Option<&str>,
-  hide_env: Option<&str>,
+  shares_env: Option<&[u8]>,
+  hide_env: Option<&[u8]>,
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values (present on the env port).
@@ -367,13 +377,17 @@ fn set_exec(
 
   let shares_env_cstr;
   if let Some(val) = shares_env {
-    shares_env_cstr = CString::new(format!("VMSH_SHARES={val}"))?;
+    let mut buf = b"VMSH_SHARES=".to_vec();
+    let () = buf.extend_from_slice(val);
+    shares_env_cstr = CString::new(buf)?;
     let () = env_ptrs.push(shares_env_cstr.as_ptr());
   }
 
   let hide_env_cstr;
   if let Some(val) = hide_env {
-    hide_env_cstr = CString::new(format!("VMSH_HIDE={val}"))?;
+    let mut buf = b"VMSH_HIDE=".to_vec();
+    let () = buf.extend_from_slice(val);
+    hide_env_cstr = CString::new(buf)?;
     let () = env_ptrs.push(hide_env_cstr.as_ptr());
   }
 
@@ -493,9 +507,6 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   let cwd = env::current_dir()
     .and_then(|p| p.canonicalize())
     .context("failed to determine current directory")?;
-  let _cwd = cwd
-    .to_str()
-    .context("current directory path is not valid UTF-8")?;
   let (shares, root_read_only) = compute_shares(&cwd, &share_rw, &share_ro, &hide);
 
   // Set up the root filesystem via the well-known root virtiofs tag.
@@ -579,13 +590,13 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   let shares_env = if shares_env_val.is_empty() {
     None
   } else {
-    Some(shares_env_val.as_str())
+    Some(shares_env_val.as_slice())
   };
   let hide_env_val = format_hide_env(&shares);
   let hide_env = if hide_env_val.is_empty() {
     None
   } else {
-    Some(hide_env_val.as_str())
+    Some(hide_env_val.as_slice())
   };
 
   let () = set_exec(
@@ -892,7 +903,7 @@ mod tests {
     let env = format_shares_env(&shares);
     assert_eq!(
       env,
-      "vmsh-0:/home/user/project:rw;vmsh-1:/tmp:rw;vmsh-2:/opt:ro"
+      b"vmsh-0:/home/user/project:rw;vmsh-1:/tmp:rw;vmsh-2:/opt:ro"
     );
   }
 
@@ -905,6 +916,27 @@ mod tests {
       (PathBuf::from("/other"), ShareAction::Hide),
     ];
     let env = format_hide_env(&shares);
-    assert_eq!(env, "/secret;/other");
+    assert_eq!(env, b"/secret;/other");
+  }
+
+  /// Non-UTF-8 path bytes survive the share/hide encoding round-trip.
+  #[test]
+  fn non_utf8_paths() {
+    // 0x80 is not valid UTF-8 on its own.
+    let rw_path = PathBuf::from(OsString::from_vec(b"/rw-\x80".to_vec()));
+    let ro_path = PathBuf::from(OsString::from_vec(b"/ro-\x80".to_vec()));
+    let hide_path = PathBuf::from(OsString::from_vec(b"/hide-\x80".to_vec()));
+
+    let shares = vec![
+      (rw_path, ShareAction::ReadWrite),
+      (ro_path, ShareAction::ReadOnly),
+      (hide_path, ShareAction::Hide),
+    ];
+
+    let env = format_shares_env(&shares);
+    assert_eq!(env, b"vmsh-0:/rw-\x80:rw;vmsh-1:/ro-\x80:ro");
+
+    let env = format_hide_env(&shares);
+    assert_eq!(env, b"/hide-\x80");
   }
 }

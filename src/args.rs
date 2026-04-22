@@ -11,11 +11,12 @@ use clap::Subcommand;
 
 fn parse_absolute_path(s: &str) -> Result<PathBuf> {
   let p = canonicalize(s).with_context(|| format!("failed to resolve path `{s}`"))?;
-  let resolved = p
-    .to_str()
-    .ok_or_else(|| anyhow::anyhow!("path `{}` contains non-UTF-8 bytes", p.display()))?;
-  if resolved.contains(':') || resolved.contains(';') {
-    anyhow::bail!("path `{resolved}` contains reserved delimiter characters (':' or ';')");
+  let bytes = p.as_os_str().as_encoded_bytes();
+  if bytes.contains(&b':') || bytes.contains(&b';') {
+    anyhow::bail!(
+      "path `{}` contains reserved delimiter characters (':' or ';')",
+      p.display()
+    );
   }
   Ok(p)
 }
