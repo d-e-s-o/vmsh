@@ -543,6 +543,12 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     .collect();
   if !hide_paths.is_empty() {
     for path in &hide_paths {
+      ensure!(
+        !cwd.starts_with(path),
+        "`--hide {}` would hide the current working directory `{}`",
+        path.display(),
+        cwd.display()
+      );
       for &upath in unlink_paths {
         ensure!(
           !upath.starts_with(path),

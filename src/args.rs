@@ -24,7 +24,15 @@ fn parse_absolute_path(s: &str) -> Result<PathBuf> {
 
 fn parse_directory_path(s: &str) -> Result<PathBuf> {
   let p = parse_absolute_path(s)?;
-  if !p.is_dir() {
+  let meta = std::fs::symlink_metadata(s)
+    .with_context(|| format!("failed to query `{s}`"))?;
+  if meta.is_symlink() {
+    anyhow::bail!(
+      "`{s}` is a symlink (target: `{}`); pass the resolved path directly",
+      p.display()
+    );
+  }
+  if !meta.is_dir() {
     anyhow::bail!("path `{}` is not a directory", p.display());
   }
   Ok(p)

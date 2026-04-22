@@ -1108,15 +1108,26 @@ fn share_rw_makes_path_writable() {
   assert_eq!(stdout, "ok", "got: {stdout:?}");
 }
 
+fn find_populated_dir() -> PathBuf {
+  for candidate in ["/opt", "/usr", "/var", "/srv"] {
+    let p = Path::new(candidate);
+    if p.is_dir() && p.read_dir().map_or(false, |mut d| d.next().is_some()) {
+      return p.to_path_buf();
+    }
+  }
+  panic!("no non-empty directory found among /opt, /usr, /var, /srv");
+}
+
 /// Verify that `--hide` makes a path invisible.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn hide_path() {
-  // /opt should exist on most systems; if not, the test is still valid
-  // because an empty tmpfs will be mounted over it.
+  let dir = find_populated_dir();
+  let dir_str = dir.display();
+  let hide_arg = format!("--hide={dir_str}");
   let output = Vm::new()
-    .arg("--hide=/opt")
-    .run(&["/bin/sh", "-c", "ls /opt 2>&1 | wc -l"]);
+    .arg(&hide_arg)
+    .run(&["/bin/sh", "-c", &format!("ls {dir_str} 2>&1 | wc -l")]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -1127,7 +1138,7 @@ fn hide_path() {
   assert_eq!(
     stdout.trim(),
     "0",
-    "/opt should appear empty when hidden, got: {stdout:?}",
+    "{dir_str} should appear empty when hidden, got: {stdout:?}",
   );
 }
 
@@ -1138,9 +1149,12 @@ fn hide_path() {
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn hide_path_cannot_be_bypassed() {
+  let dir = find_populated_dir();
+  let dir_str = dir.display();
+  let hide_arg = format!("--hide={dir_str}");
   let output = Vm::new()
-    .arg("--hide=/opt")
-    .run(&["/bin/sh", "-c", "umount /opt 2>/dev/null; ls /opt | wc -l"]);
+    .arg(&hide_arg)
+    .run(&["/bin/sh", "-c", &format!("umount {dir_str} 2>/dev/null; ls {dir_str} | wc -l")]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -1151,7 +1165,7 @@ fn hide_path_cannot_be_bypassed() {
   assert_eq!(
     stdout.trim(),
     "0",
-    "/opt should remain empty after umount attempt, got: {stdout:?}",
+    "{dir_str} should remain empty after umount attempt, got: {stdout:?}",
   );
 }
 
