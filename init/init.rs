@@ -6,6 +6,7 @@ use std::ffi::c_short;
 use std::ffi::c_ulong;
 use std::fs;
 use std::fs::DirBuilder;
+use std::fs::read_dir;
 use std::io;
 use std::mem;
 use std::os::unix::fs::DirBuilderExt as _;
@@ -13,7 +14,11 @@ use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::io::FromRawFd as _;
 use std::os::unix::io::OwnedFd;
+use std::path::Path;
+use std::path::PathBuf;
 use std::ptr;
+use std::thread::sleep;
+use std::time::Duration;
 
 use libc::AF_INET;
 use libc::EBUSY;
@@ -191,6 +196,40 @@ fn bring_up_loopback() {
 
   // SAFETY: `sock` is a valid socket, `ifr` is a valid `ifreq` struct.
   let _rc = unsafe { ioctl(sock.as_raw_fd(), SIOCSIFFLAGS, &ifr) };
+}
+
+/// Find a named virtio console port.
+///
+/// The function scans `/sys/class/virtio-ports/` for a port whose name
+/// matches `target_name`. It returns the device path (e.g.
+/// `/dev/vport0p1`) on success, polling up to `max_attempts` times, 1
+/// ms apart.
+#[allow(dead_code)]
+fn find_virtio_port(target_name: &str, max_attempts: i32) -> Option<PathBuf> {
+  let base = Path::new("/sys/class/virtio-ports");
+  for attempt in 0..max_attempts {
+    if attempt > 0 {
+      let () = sleep(Duration::from_millis(1));
+    }
+
+    let entries = match read_dir(base) {
+      Ok(e) => e,
+      Err(_) => continue,
+    };
+
+    for entry in entries.flatten() {
+      let name_path = entry.path().join("name");
+      let port_name = match fs::read_to_string(&name_path) {
+        Ok(n) => n,
+        Err(_) => continue,
+      };
+
+      if port_name.trim_end_matches(['\n', '\r']) == target_name {
+        return Some(Path::new("/dev").join(entry.file_name()));
+      }
+    }
+  }
+  None
 }
 
 fn main() {}
