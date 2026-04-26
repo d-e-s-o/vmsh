@@ -1,14 +1,20 @@
 //! Minimal init process for vmsh.
 
+use std::env;
 use std::ffi::CStr;
 use std::ffi::c_char;
+use std::ffi::c_int;
 use std::ffi::c_short;
 use std::ffi::c_ulong;
 use std::fs;
 use std::fs::DirBuilder;
+use std::fs::File;
 use std::fs::read_dir;
 use std::io;
+use std::io::BufRead as _;
+use std::io::BufReader;
 use std::mem;
+use std::mem::MaybeUninit;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd as _;
@@ -33,6 +39,14 @@ use libc::ifreq;
 use libc::ioctl;
 use libc::mount;
 use libc::socket;
+use libc::statfs;
+
+
+/// Ioctl number used by libkrun's virtiofs to communicate exit codes.
+const KRUN_EXIT_CODE_IOCTL: c_ulong = 0x7602;
+
+/// virtiofs magic number from `statfs`.
+const VIRTIOFS_MAGIC: c_ulong = 0x6573_5546;
 
 
 #[allow(dead_code)]
@@ -231,5 +245,73 @@ fn find_virtio_port(target_name: &str, max_attempts: i32) -> Option<PathBuf> {
   }
   None
 }
+
+
+#[allow(dead_code)]
+fn set_exit_code(code: c_int) {
+  let mut buf = MaybeUninit::<statfs>::uninit();
+  // SAFETY: "/" is a valid NUL-terminated path and `buf` is writable.
+  let rc = unsafe { statfs(c"/".as_ptr(), buf.as_mut_ptr()) };
+  if rc != 0 {
+    eprintln!("vmsh-init: warning: could not statfs /");
+    return;
+  }
+  // SAFETY: `statfs` succeeded, so `buf` is initialized.
+  let buf = unsafe { buf.assume_init() };
+  if buf.f_type as c_ulong != VIRTIOFS_MAGIC {
+    return;
+  }
+
+  let file = match File::open("/") {
+    Ok(f) => f,
+    Err(_) => {
+      eprintln!("vmsh-init: warning: could not open / for exit code ioctl");
+      return;
+    },
+  };
+
+  // SAFETY: `file` is a valid, open file descriptor.
+  let _rc = unsafe { ioctl(file.as_raw_fd(), KRUN_EXIT_CODE_IOCTL, code) };
+}
+
+
+/// Load environment variables from a virtio console port.
+///
+/// The kernel command line has a limited number of env var slots, so we
+/// pass bulk env vars (other than `VMSH_*`) through a dedicated virtio
+/// console port backed by a memfd on the host. The file format is one
+/// `KEY=VALUE` per line.
+#[allow(dead_code)]
+fn load_env_vars() {
+  if env::var_os("VMSH_ENV_PORT").is_none() {
+    return;
+  }
+
+  let dev_path = match find_virtio_port("krun-env", 500) {
+    Some(p) => p,
+    None => return,
+  };
+
+  let file = match File::open(&dev_path) {
+    Ok(f) => f,
+    Err(_) => return,
+  };
+
+  let reader = BufReader::new(file);
+  for line in reader.lines() {
+    let line = match line {
+      Ok(l) => l,
+      Err(_) => break,
+    };
+    if line.is_empty() {
+      continue;
+    }
+
+    if let Some((key, value)) = line.split_once('=') {
+      let () = unsafe { env::set_var(key, value) };
+    }
+  }
+}
+
 
 fn main() {}
