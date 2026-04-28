@@ -19,6 +19,7 @@ use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::io::FromRawFd as _;
+use std::os::unix::io::IntoRawFd as _;
 use std::os::unix::io::OwnedFd;
 use std::path::Path;
 use std::path::PathBuf;
@@ -35,6 +36,11 @@ use libc::MS_NOSUID;
 use libc::MS_RELATIME;
 use libc::SIOCSIFFLAGS;
 use libc::SOCK_DGRAM;
+use libc::STDERR_FILENO;
+use libc::STDIN_FILENO;
+use libc::STDOUT_FILENO;
+use libc::close;
+use libc::dup2;
 use libc::ifreq;
 use libc::ioctl;
 use libc::mount;
@@ -309,6 +315,99 @@ fn load_env_vars() {
 
     if let Some((key, value)) = line.split_once('=') {
       let () = unsafe { env::set_var(key, value) };
+    }
+  }
+}
+
+
+/// Redirect stdin/stdout/stderr to virtio console ports.
+///
+/// `VMSH_STDIN`, `VMSH_STDOUT`, and `VMSH_STDERR` signal which file
+/// descriptors have been redirected and need a corresponding virtio
+/// console port. Each port is discovered and `dup2`'d onto the
+/// corresponding file descriptor.
+#[allow(dead_code)]
+fn setup_redirects() {
+  #[derive(Clone, Copy)]
+  struct Redirect {
+    port_name: &'static str,
+    target_fd: c_int,
+    read: bool,
+    done: bool,
+  }
+
+  let mut redirects = [Redirect {
+    port_name: "",
+    target_fd: 0,
+    read: false,
+    done: false,
+  }; 3];
+  let mut count = 0;
+
+  let mut push = |port_name, target_fd, read| {
+    redirects[count] = Redirect {
+      port_name,
+      target_fd,
+      read,
+      done: false,
+    };
+    count += 1;
+  };
+
+  if env::var_os("VMSH_STDIN").is_some() {
+    let () = push("krun-stdin", STDIN_FILENO, true);
+  }
+  if env::var_os("VMSH_STDOUT").is_some() {
+    let () = push("krun-stdout", STDOUT_FILENO, false);
+  }
+  if env::var_os("VMSH_STDERR").is_some() {
+    let () = push("krun-stderr", STDERR_FILENO, false);
+  }
+
+  if count == 0 {
+    return;
+  }
+
+  // Poll all pending ports concurrently, 1 ms apart, up to 500 ms.
+  let redirects = &mut redirects[..count];
+  let mut remaining = count;
+
+  for attempt in 0..500 {
+    if remaining == 0 {
+      break;
+    }
+    if attempt > 0 {
+      let () = sleep(Duration::from_millis(1));
+    }
+
+    for redirect in redirects.iter_mut() {
+      if redirect.done {
+        continue;
+      }
+
+      let dev_path = match find_virtio_port(redirect.port_name, 1) {
+        Some(p) => p,
+        None => continue,
+      };
+
+      let result = if redirect.read {
+        File::open(&dev_path)
+      } else {
+        fs::OpenOptions::new().write(true).open(&dev_path)
+      };
+
+      if let Ok(file) = result {
+        let fd = file.into_raw_fd();
+        // SAFETY: both `fd` and `target_fd` are valid file descriptors.
+        let _rc = unsafe { dup2(fd, redirect.target_fd) };
+        if fd != redirect.target_fd {
+          // SAFETY: `fd` is a valid file descriptor.
+          let _rc = unsafe { close(fd) };
+        }
+      }
+
+      redirect.done = true;
+      remaining -= 1;
     }
   }
 }
