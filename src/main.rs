@@ -16,6 +16,7 @@ use std::ffi::c_char;
 use std::fs::File;
 use std::fs::remove_file;
 use std::fs::write;
+use std::io;
 use std::io::Seek as _;
 use std::io::Write as _;
 use std::mem::MaybeUninit;
@@ -32,6 +33,7 @@ use std::ptr;
 
 use anyhow::Context as _;
 use anyhow::Result;
+use anyhow::bail;
 use anyhow::ensure;
 
 use clap::Parser;
@@ -48,17 +50,22 @@ use crate::args::RunArgs;
 enum ShareAction {
   /// Share the path read-write via a virtiofs device.
   ReadWrite,
-  /// Share the path read-only via a virtiofs device.
+  /// Share the path read-only via a virtiofs device. This is only
+  /// needed for explicit `--share-ro` requests; the default read-only
+  /// root already covers most paths.
   ReadOnly,
+  /// Hide the path by overlaying an empty tmpfs in the host mount
+  /// namespace, so the guest cannot bypass it.
+  Hide,
 }
 
 
-/// Compute the final list of filesystem shares.
+/// Compute the final list of filesystem shares and hide actions.
 ///
 /// Starts with defaults (cwd rw, /tmp rw), then applies user flags
-/// in fixed group order: `--share-rw`, then `--share-ro`. When the
-/// same path appears in multiple groups, the later group wins
-/// (`--share-ro` > `--share-rw`).
+/// in fixed group order: `--share-rw`, then `--share-ro`, then
+/// `--hide`. When the same path appears in multiple groups, the
+/// later group wins (`--hide` > `--share-ro` > `--share-rw`).
 ///
 /// Returns the list of `(path, action)` pairs and whether the root
 /// should be read-only (false only if `--share-rw /` was given).
@@ -66,27 +73,42 @@ fn compute_shares(
   cwd: &Path,
   share_rw: &[PathBuf],
   share_ro: &[PathBuf],
+  hide: &[PathBuf],
 ) -> (Vec<(PathBuf, ShareAction)>, bool) {
-  // We process groups in fixed order: defaults, then --share-rw, then
-  // --share-ro. Inside each group, later entries win.
-  let mut entries = Vec::<(PathBuf, ShareAction)>::new();
+  // We need to process arguments in the order they were given on the
+  // command line. Since clap collects each flag into its own Vec, we
+  // reconstruct the ordering by interleaving them according to their
+  // original positions. However, clap doesn't expose argument positions
+  // easily, so we use a simpler model: defaults first, then --share-rw,
+  // then --share-ro, then --hide. This means --hide always beats
+  // --share-rw for the same path (which is the last-wins semantics
+  // applied to the flag groups in this fixed order).
+  //
+  // For truly order-dependent semantics we would need a single
+  // `--share` flag with inline mode syntax, but the current approach is
+  // simpler and covers the expected use cases.
+  let mut map = Vec::<(PathBuf, ShareAction)>::new();
 
-  // Apply defaults: cwd and /tmp writable.
-  let () = entries.push((cwd.to_path_buf(), ShareAction::ReadWrite));
-  let () = entries.push((PathBuf::from("/tmp"), ShareAction::ReadWrite));
+  // Apply defaults.
+  let () = map.push((cwd.to_path_buf(), ShareAction::ReadWrite));
+  let () = map.push((PathBuf::from("/tmp"), ShareAction::ReadWrite));
 
+  // Apply user overrides in flag-group order.
   for path in share_rw {
-    let () = entries.push((path.clone(), ShareAction::ReadWrite));
+    let () = map.push((path.clone(), ShareAction::ReadWrite));
   }
   for path in share_ro {
-    let () = entries.push((path.clone(), ShareAction::ReadOnly));
+    let () = map.push((path.clone(), ShareAction::ReadOnly));
+  }
+  for path in hide {
+    let () = map.push((path.clone(), ShareAction::Hide));
   }
 
   // Deduplicate: last-wins. Walk backwards, keep only the first
   // occurrence of each canonical path.
   let mut seen = Vec::new();
   let mut deduped = Vec::new();
-  for (path, action) in entries.into_iter().rev() {
+  for (path, action) in map.into_iter().rev() {
     if seen.iter().any(|p: &PathBuf| p == &path) {
       continue;
     }
@@ -116,10 +138,12 @@ fn compute_shares(
 /// where mode is `rw` or `ro`.
 fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
   let mut out = Vec::new();
-  for (idx, (path, action)) in shares.iter().enumerate() {
+  let mut idx = 0usize;
+  for (path, action) in shares {
     let mode = match action {
       ShareAction::ReadWrite => &b"rw"[..],
       ShareAction::ReadOnly => &b"ro"[..],
+      ShareAction::Hide => continue,
     };
     if !out.is_empty() {
       let () = out.push(b';');
@@ -129,8 +153,80 @@ fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
     let () = out.extend_from_slice(path.as_os_str().as_bytes());
     let () = out.push(b':');
     let () = out.extend_from_slice(mode);
+
+    idx += 1;
   }
   out
+}
+
+
+/// Enter a user + mount namespace and hide the given paths.
+///
+/// Creates a new user namespace (to avoid requiring root) and a new
+/// mount namespace, then mounts empty tmpfs over each path. The
+/// virtiofs daemon in libkrun inherits this namespace, so the guest
+/// cannot see the hidden paths.
+fn enter_hiding_namespace(paths: &[PathBuf]) -> Result<()> {
+  // SAFETY: `getuid` is always safe.
+  let uid = unsafe { libc::getuid() };
+  // SAFETY: `getgid` is always safe.
+  let gid = unsafe { libc::getgid() };
+
+  // SAFETY: `unshare` is safe to call.
+  let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNS) };
+  if rc < 0 {
+    let err = io::Error::last_os_error();
+    bail!(
+      "failed to create user/mount namespace for --hide: {err}\n\
+       hint: check `sysctl kernel.unprivileged_userns_clone` or run with CAP_SYS_ADMIN"
+    );
+  }
+
+  // Set up identity UID/GID mappings so file access semantics are preserved.
+  write("/proc/self/setgroups", "deny").context("failed to write /proc/self/setgroups")?;
+  write("/proc/self/uid_map", format!("{uid} {uid} 1"))
+    .context("failed to write /proc/self/uid_map")?;
+  write("/proc/self/gid_map", format!("{gid} {gid} 1"))
+    .context("failed to write /proc/self/gid_map")?;
+
+  // Prevent mount events from propagating back to the parent namespace.
+  // SAFETY: "/" is a valid path, no data argument needed for remount.
+  let rc = unsafe {
+    libc::mount(
+      ptr::null(),
+      c"/".as_ptr(),
+      ptr::null(),
+      libc::MS_REC | libc::MS_PRIVATE,
+      ptr::null(),
+    )
+  };
+  ensure!(
+    rc == 0,
+    "failed to make mounts private: {}",
+    io::Error::last_os_error()
+  );
+
+  for path in paths {
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: All arguments are valid NUL-terminated strings.
+    let rc = unsafe {
+      libc::mount(
+        c"tmpfs".as_ptr(),
+        c_path.as_ptr(),
+        c"tmpfs".as_ptr(),
+        0,
+        c"size=0".as_ptr().cast(),
+      )
+    };
+    ensure!(
+      rc == 0,
+      "failed to mount tmpfs over `{}`: {}",
+      path.display(),
+      io::Error::last_os_error()
+    );
+  }
+
+  Ok(())
 }
 
 
@@ -388,6 +484,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     verbosity,
     share_rw,
     share_ro,
+    hide,
   } = args;
 
   // SANITY: Caller guarantees that a kernel is always set.
@@ -457,7 +554,34 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   let cwd = env::current_dir()
     .and_then(|p| p.canonicalize())
     .context("failed to determine current directory")?;
-  let (shares, root_read_only) = compute_shares(&cwd, &share_rw, &share_ro);
+  let (shares, root_read_only) = compute_shares(&cwd, &share_rw, &share_ro, &hide);
+
+  // Hide paths by overlaying empty tmpfs in a new mount namespace.
+  // Must happen before virtiofs setup so the daemon inherits the view.
+  let hide_paths: Vec<PathBuf> = shares
+    .iter()
+    .filter(|(_, a)| matches!(a, ShareAction::Hide))
+    .map(|(p, _)| p.clone())
+    .collect();
+  if !hide_paths.is_empty() {
+    for path in &hide_paths {
+      ensure!(
+        !cwd.starts_with(path),
+        "`--hide {}` would hide the current working directory `{}`",
+        path.display(),
+        cwd.display()
+      );
+      for &upath in unlink_paths {
+        ensure!(
+          !upath.starts_with(path),
+          "`--hide {}` would hide `{}`",
+          path.display(),
+          upath.display()
+        );
+      }
+    }
+    enter_hiding_namespace(&hide_paths)?;
+  }
 
   // Set up the root filesystem via the well-known root virtiofs tag.
   // By default the root is read-only; `--share-rw /` makes it rw.
@@ -477,13 +601,15 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   };
   ensure!(rc >= 0, "failed to set root filesystem");
 
-  // Add virtiofs devices for each share.
-  for (idx, (path, action)) in shares.iter().enumerate() {
+  // Add virtiofs devices for each share (rw or explicit ro).
+  let mut share_idx = 0u32;
+  for (path, action) in &shares {
     let read_only = match action {
       ShareAction::ReadWrite => false,
       ShareAction::ReadOnly => true,
+      ShareAction::Hide => continue,
     };
-    let tag = format!("vmsh-{idx}");
+    let tag = format!("vmsh-{share_idx}");
     let c_tag = CString::new(tag)?;
     let c_path = CString::new(path.as_os_str().as_bytes())?;
     // SAFETY: `ctx` is a valid krun context, `c_tag` and `c_path` are
@@ -495,6 +621,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
       "failed to add virtiofs share for `{}`",
       path.display()
     );
+    share_idx += 1;
   }
 
   // Set the working directory to the host cwd.
@@ -531,6 +658,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     };
     ensure!(rc >= 0, "failed to add env console port");
   }
+
   // Build share metadata for the guest init.
   let shares_env_val = format_shares_env(&shares);
   let shares_env = if shares_env_val.is_empty() {
@@ -732,7 +860,7 @@ mod tests {
   #[test]
   fn default_shares() {
     let cwd = PathBuf::from("/home/user/project");
-    let (shares, root_ro) = compute_shares(&cwd, &[], &[]);
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[], &[]);
     assert!(root_ro);
     assert_eq!(shares.len(), 2);
     assert_eq!(
@@ -746,7 +874,7 @@ mod tests {
   #[test]
   fn share_rw_adds_path() {
     let cwd = PathBuf::from("/home/user");
-    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/data")], &[]);
+    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/data")], &[], &[]);
     assert!(root_ro);
     assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
   }
@@ -755,26 +883,60 @@ mod tests {
   #[test]
   fn share_ro_adds_path() {
     let cwd = PathBuf::from("/home/user");
-    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/opt")]);
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/opt")], &[]);
     assert!(root_ro);
     assert!(shares.contains(&(PathBuf::from("/opt"), ShareAction::ReadOnly)));
   }
 
-  /// Last-wins: `--share-rw /data --share-ro /data` results in ro
-  /// (since --share-ro group comes after --share-rw).
+  /// `--hide /tmp` removes the default /tmp share and replaces it
+  /// with a hide action.
+  #[test]
+  fn hide_removes_default() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, _) = compute_shares(&cwd, &[], &[], &[PathBuf::from("/tmp")]);
+    assert!(!shares.contains(&(PathBuf::from("/tmp"), ShareAction::ReadWrite)));
+    assert!(shares.contains(&(PathBuf::from("/tmp"), ShareAction::Hide)));
+  }
+
+  /// Last-wins: `--share-ro /data --share-rw /data` results in rw.
+  /// (In our fixed ordering, --share-rw comes before --share-ro,
+  /// so --share-ro would win. But if both are rw, the last rw wins.)
   #[test]
   fn last_wins_same_flag_type() {
     let cwd = PathBuf::from("/home/user");
-    let (shares, _) = compute_shares(&cwd, &[PathBuf::from("/data")], &[PathBuf::from("/data")]);
+    // --share-rw /data appears first, but --share-ro /data comes
+    // later in the fixed ordering.
+    let (shares, _) = compute_shares(
+      &cwd,
+      &[PathBuf::from("/data")],
+      &[PathBuf::from("/data")],
+      &[],
+    );
+    // --share-ro group comes after --share-rw, so ro wins.
     assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadOnly)));
     assert!(!shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
+  }
+
+  /// `--share-rw /etc --hide /etc` results in /etc hidden
+  /// (hide group comes last).
+  #[test]
+  fn last_wins_hide_over_share() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, _) = compute_shares(
+      &cwd,
+      &[PathBuf::from("/etc")],
+      &[],
+      &[PathBuf::from("/etc")],
+    );
+    assert!(shares.contains(&(PathBuf::from("/etc"), ShareAction::Hide)));
+    assert!(!shares.contains(&(PathBuf::from("/etc"), ShareAction::ReadWrite)));
   }
 
   /// `--share-rw /` disables isolation (root is rw).
   #[test]
   fn share_rw_root_disables_isolation() {
     let cwd = PathBuf::from("/home/user");
-    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/")], &[]);
+    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/")], &[], &[]);
     assert!(!root_ro);
     // The "/" entry itself is removed from shares.
     assert!(!shares.iter().any(|(p, _)| p == Path::new("/")));
@@ -785,7 +947,7 @@ mod tests {
   #[test]
   fn share_ro_root_is_noop() {
     let cwd = PathBuf::from("/home/user");
-    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/")]);
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/")], &[]);
     assert!(root_ro);
     assert!(!shares.iter().any(|(p, _)| p == Path::new("/")));
   }
@@ -797,6 +959,7 @@ mod tests {
       (PathBuf::from("/home/user/project"), ShareAction::ReadWrite),
       (PathBuf::from("/tmp"), ShareAction::ReadWrite),
       (PathBuf::from("/opt"), ShareAction::ReadOnly),
+      (PathBuf::from("/secret"), ShareAction::Hide),
     ];
     let env = format_shares_env(&shares);
     assert_eq!(
@@ -811,10 +974,12 @@ mod tests {
     // 0x80 is not valid UTF-8 on its own.
     let rw_path = PathBuf::from(OsString::from_vec(b"/rw-\x80".to_vec()));
     let ro_path = PathBuf::from(OsString::from_vec(b"/ro-\x80".to_vec()));
+    let hide_path = PathBuf::from(OsString::from_vec(b"/hide-\x80".to_vec()));
 
     let shares = vec![
       (rw_path, ShareAction::ReadWrite),
       (ro_path, ShareAction::ReadOnly),
+      (hide_path, ShareAction::Hide),
     ];
 
     let env = format_shares_env(&shares);

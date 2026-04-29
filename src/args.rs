@@ -1,9 +1,11 @@
 use std::fs::canonicalize;
+use std::fs::symlink_metadata;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
 use anyhow::Result;
 use anyhow::bail;
+use anyhow::ensure;
 
 use clap::ArgAction;
 use clap::Parser;
@@ -19,6 +21,19 @@ fn parse_absolute_path(s: &str) -> Result<PathBuf> {
       p.display()
     );
   }
+  Ok(p)
+}
+
+
+fn parse_directory_path(s: &str) -> Result<PathBuf> {
+  let p = parse_absolute_path(s)?;
+  let meta = symlink_metadata(s).with_context(|| format!("failed to query `{s}`"))?;
+  ensure!(
+    !meta.is_symlink(),
+    "`{s}` is a symlink (target: `{}`); pass the resolved path directly",
+    p.display()
+  );
+  ensure!(meta.is_dir(), "path `{}` is not a directory", p.display());
   Ok(p)
 }
 
@@ -86,17 +101,24 @@ pub struct RunArgs {
   pub all_envs: bool,
   /// Share a host path as read-write inside the guest.
   ///
-  /// Adds a writable virtiofs mount at the given path. Can be
-  /// specified multiple times. When the same path appears in both
-  /// `--share-rw` and `--share-ro`, `--share-ro` wins.
+  /// By default the guest sees the host filesystem as read-only.
+  /// This flag punches through a writable mount at the given path.
+  /// Can be specified multiple times. When the same path appears in
+  /// multiple flags, `--hide` takes precedence over `--share-ro`,
+  /// which takes precedence over `--share-rw`.
   #[clap(long, value_parser = parse_absolute_path)]
   pub share_rw: Vec<PathBuf>,
   /// Share a host path as read-only inside the guest.
   ///
-  /// Adds a read-only virtiofs mount at the given path. Can be
-  /// specified multiple times.
+  /// Useful for sharing additional paths with explicit read-only
+  /// enforcement beyond what the read-only root already provides.
   #[clap(long, value_parser = parse_absolute_path)]
   pub share_ro: Vec<PathBuf>,
+  /// Hide a host directory from the guest.
+  ///
+  /// The path must be an existing directory.
+  #[clap(long, value_parser = parse_directory_path)]
+  pub hide: Vec<PathBuf>,
   /// Increase verbosity (can be supplied multiple times).
   #[clap(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
   pub verbosity: u8,

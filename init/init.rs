@@ -596,8 +596,9 @@ fn main() {
   let () = bring_up_loopback();
 
   // Mount virtiofs shares first so that /tmp (and other paths) become
-  // writable. This must happen before unlink/load_env_vars, because the
-  // root filesystem may be read-only and those files live in /tmp.
+  // writable. This must happen before `unlink_temp_files` /
+  // `load_env_vars`, because the root filesystem may be read-only and
+  // those files live in `/tmp`.
   let () = mount_shares();
 
   // Remove temporary files now that rw shares are mounted. We must do
