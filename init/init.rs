@@ -439,4 +439,18 @@ fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
 }
 
 
+/// Delete colon-separated paths listed in `VMSH_UNLINK`.
+#[allow(dead_code)]
+fn unlink_temp_files() {
+  let list = match env::var("VMSH_UNLINK") {
+    Ok(l) => l,
+    Err(_) => return,
+  };
+
+  for path in list.split(':') {
+    let _result = fs::remove_file(path);
+  }
+}
+
+
 fn main() {}
