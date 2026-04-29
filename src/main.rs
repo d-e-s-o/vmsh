@@ -42,6 +42,74 @@ use crate::args::Command;
 use crate::args::RunArgs;
 
 
+/// The action to take for a given filesystem path in the guest.
+#[derive(Clone, Debug, PartialEq)]
+enum ShareAction {
+  /// Share the path read-write via a virtiofs device.
+  ReadWrite,
+  /// Share the path read-only via a virtiofs device.
+  ReadOnly,
+}
+
+
+/// Compute the final list of filesystem shares.
+///
+/// Applies user flags in fixed group order: `--share-rw`, then
+/// `--share-ro`. When the same path appears in multiple groups, the
+/// later group wins (`--share-ro` > `--share-rw`).
+fn compute_shares(share_rw: &[PathBuf], share_ro: &[PathBuf]) -> Vec<(PathBuf, ShareAction)> {
+  // We process groups in fixed order: --share-rw first, then
+  // --share-ro. Inside each group, later entries win.
+  let mut entries = Vec::<(PathBuf, ShareAction)>::new();
+
+  for path in share_rw {
+    let () = entries.push((path.clone(), ShareAction::ReadWrite));
+  }
+  for path in share_ro {
+    let () = entries.push((path.clone(), ShareAction::ReadOnly));
+  }
+
+  // Deduplicate: last-wins. Walk backwards, keep only the first
+  // occurrence of each canonical path.
+  let mut seen = Vec::new();
+  let mut deduped = Vec::new();
+  for (path, action) in entries.into_iter().rev() {
+    if seen.iter().any(|p: &PathBuf| p == &path) {
+      continue;
+    }
+    let () = seen.push(path.clone());
+    let () = deduped.push((path, action));
+  }
+  let () = deduped.reverse();
+
+  deduped
+}
+
+
+/// Format share metadata as an environment variable value.
+///
+/// Format: `tag:path:mode[;tag:path:mode]...`
+/// where mode is `rw` or `ro`.
+fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
+  let mut out = Vec::new();
+  for (idx, (path, action)) in shares.iter().enumerate() {
+    let mode = match action {
+      ShareAction::ReadWrite => &b"rw"[..],
+      ShareAction::ReadOnly => &b"ro"[..],
+    };
+    if !out.is_empty() {
+      let () = out.push(b';');
+    }
+    let () = out.extend_from_slice(format!("vmsh-{idx}").as_bytes());
+    let () = out.push(b':');
+    let () = out.extend_from_slice(path.as_os_str().as_bytes());
+    let () = out.push(b':');
+    let () = out.extend_from_slice(mode);
+  }
+  out
+}
+
+
 /// Embedded init binary.
 const INIT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmsh-init"));
 
@@ -186,6 +254,7 @@ fn set_exec(
   command: Vec<String>,
   has_env_port: bool,
   unlink_paths: &[&Path],
+  shares_env: Option<&[u8]>,
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values (present on the env port).
@@ -236,6 +305,14 @@ fn set_exec(
     let () = env_ptrs.push(c"VMSH_STDERR=1".as_ptr());
   }
 
+  let shares_env_cstr;
+  if let Some(val) = shares_env {
+    let mut buf = b"VMSH_SHARES=".to_vec();
+    let () = buf.extend_from_slice(val);
+    shares_env_cstr = CString::new(buf)?;
+    let () = env_ptrs.push(shares_env_cstr.as_ptr());
+  }
+
   let () = env_ptrs.push(ptr::null());
 
   // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
@@ -280,6 +357,8 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     env_vars,
     all_envs,
     verbosity,
+    share_rw,
+    share_ro,
   } = args;
 
   // SANITY: Caller guarantees that a kernel is always set.
@@ -350,6 +429,29 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
   ensure!(rc >= 0, "failed to set root filesystem");
 
+  // Compute additional virtiofs shares from --share-rw / --share-ro.
+  let shares = compute_shares(&share_rw, &share_ro);
+
+  // Add virtiofs devices for each share.
+  for (idx, (path, action)) in shares.iter().enumerate() {
+    let read_only = match action {
+      ShareAction::ReadWrite => false,
+      ShareAction::ReadOnly => true,
+    };
+    let tag = format!("vmsh-{idx}");
+    let c_tag = CString::new(tag)?;
+    let c_path = CString::new(path.as_os_str().as_bytes())?;
+    // SAFETY: `ctx` is a valid krun context, `c_tag` and `c_path` are
+    //         valid NUL-terminated strings.
+    let rc =
+      unsafe { krun::krun_add_virtiofs3(ctx, c_tag.as_ptr(), c_path.as_ptr(), 0, read_only) };
+    ensure!(
+      rc >= 0,
+      "failed to add virtiofs share for `{}`",
+      path.display()
+    );
+  }
+
   // Pass environment variables to the guest via a virtio console port
   // backed by a memfd. The guest init discovers the port by name and
   // reads KEY=VALUE lines until EOF.
@@ -377,7 +479,15 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     };
     ensure!(rc >= 0, "failed to add env console port");
   }
-  let () = set_exec(ctx, command, has_env_port, unlink_paths)?;
+  // Build share metadata for the guest init.
+  let shares_env_val = format_shares_env(&shares);
+  let shares_env = if shares_env_val.is_empty() {
+    None
+  } else {
+    Some(shares_env_val.as_slice())
+  };
+
+  let () = set_exec(ctx, command, has_env_port, unlink_paths, shares_env)?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");
@@ -563,5 +673,60 @@ mod tests {
     let text = String::from_utf8(content).unwrap();
     let count = text.matches("PATH=").count();
     assert_eq!(count, 1);
+  }
+
+
+  /// `--share-rw /data` adds an rw entry.
+  #[test]
+  fn share_rw_adds_path() {
+    let shares = compute_shares(&[PathBuf::from("/data")], &[]);
+    assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
+  }
+
+  /// `--share-ro /opt` adds an ro entry.
+  #[test]
+  fn share_ro_adds_path() {
+    let shares = compute_shares(&[], &[PathBuf::from("/opt")]);
+    assert!(shares.contains(&(PathBuf::from("/opt"), ShareAction::ReadOnly)));
+  }
+
+  /// Last-wins: `--share-rw /data --share-ro /data` results in ro
+  /// (since --share-ro group comes after --share-rw).
+  #[test]
+  fn last_wins_same_flag_type() {
+    let shares = compute_shares(&[PathBuf::from("/data")], &[PathBuf::from("/data")]);
+    assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadOnly)));
+    assert!(!shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
+  }
+
+  /// Verify the `VMSH_SHARES` env var format.
+  #[test]
+  fn share_metadata_format() {
+    let shares = vec![
+      (PathBuf::from("/home/user/project"), ShareAction::ReadWrite),
+      (PathBuf::from("/tmp"), ShareAction::ReadWrite),
+      (PathBuf::from("/opt"), ShareAction::ReadOnly),
+    ];
+    let env = format_shares_env(&shares);
+    assert_eq!(
+      env,
+      b"vmsh-0:/home/user/project:rw;vmsh-1:/tmp:rw;vmsh-2:/opt:ro"
+    );
+  }
+
+  /// Non-UTF-8 path bytes survive the share encoding round-trip.
+  #[test]
+  fn non_utf8_paths() {
+    // 0x80 is not valid UTF-8 on its own.
+    let rw_path = PathBuf::from(OsString::from_vec(b"/rw-\x80".to_vec()));
+    let ro_path = PathBuf::from(OsString::from_vec(b"/ro-\x80".to_vec()));
+
+    let shares = vec![
+      (rw_path, ShareAction::ReadWrite),
+      (ro_path, ShareAction::ReadOnly),
+    ];
+
+    let env = format_shares_env(&shares);
+    assert_eq!(env, b"vmsh-0:/rw-\x80:rw;vmsh-1:/ro-\x80:ro");
   }
 }

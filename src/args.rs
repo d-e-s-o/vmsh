@@ -1,8 +1,26 @@
+use std::fs::canonicalize;
 use std::path::PathBuf;
+
+use anyhow::Context as _;
+use anyhow::Result;
+use anyhow::bail;
 
 use clap::ArgAction;
 use clap::Parser;
 use clap::Subcommand;
+
+
+fn parse_absolute_path(s: &str) -> Result<PathBuf> {
+  let p = canonicalize(s).with_context(|| format!("failed to resolve path `{s}`"))?;
+  let bytes = p.as_os_str().as_encoded_bytes();
+  if bytes.contains(&b':') || bytes.contains(&b';') {
+    bail!(
+      "path `{}` contains reserved delimiter characters (':' or ';')",
+      p.display()
+    );
+  }
+  Ok(p)
+}
 
 
 /// Transparently run a shell (or other binary) in a VM.
@@ -66,6 +84,19 @@ pub struct RunArgs {
   /// (`KRUN_*`) are excluded. Individual `--env` flags take precedence.
   #[clap(long)]
   pub all_envs: bool,
+  /// Share a host path as read-write inside the guest.
+  ///
+  /// Adds a writable virtiofs mount at the given path. Can be
+  /// specified multiple times. When the same path appears in both
+  /// `--share-rw` and `--share-ro`, `--share-ro` wins.
+  #[clap(long, value_parser = parse_absolute_path)]
+  pub share_rw: Vec<PathBuf>,
+  /// Share a host path as read-only inside the guest.
+  ///
+  /// Adds a read-only virtiofs mount at the given path. Can be
+  /// specified multiple times.
+  #[clap(long, value_parser = parse_absolute_path)]
+  pub share_ro: Vec<PathBuf>,
   /// Increase verbosity (can be supplied multiple times).
   #[clap(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
   pub verbosity: u8,
