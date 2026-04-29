@@ -27,8 +27,10 @@ use std::ptr;
 use std::thread::sleep;
 use std::time::Duration;
 
+use libc::_exit;
 use libc::AF_INET;
 use libc::EBUSY;
+use libc::ENOENT;
 use libc::IFF_UP;
 use libc::MS_NODEV;
 use libc::MS_NOEXEC;
@@ -41,6 +43,7 @@ use libc::STDIN_FILENO;
 use libc::STDOUT_FILENO;
 use libc::close;
 use libc::dup2;
+use libc::execvp;
 use libc::ifreq;
 use libc::ioctl;
 use libc::mount;
@@ -410,6 +413,29 @@ fn setup_redirects() {
       remaining -= 1;
     }
   }
+}
+
+
+#[allow(dead_code)]
+fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
+  // SAFETY: `exec_path` and `exec_argv` are valid NUL-terminated
+  // strings. `exec_argv` is NULL-terminated.
+  let _rc = unsafe { execvp(exec_path.as_ptr(), exec_argv.as_ptr()) };
+
+  // If exec returns, it failed.
+  let err = io::Error::last_os_error();
+  let code = if err.raw_os_error() == Some(ENOENT) {
+    127
+  } else {
+    126
+  };
+  eprintln!(
+    "vmsh-init: couldn't execute '{}': {err}",
+    exec_path.to_str().unwrap_or("?")
+  );
+  let () = set_exit_code(code);
+  // SAFETY: Exiting the process is always safe at this point.
+  unsafe { _exit(code) }
 }
 
 
