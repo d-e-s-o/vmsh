@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
 use std::env::temp_dir;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -54,13 +55,25 @@ enum ShareAction {
 
 /// Compute the final list of filesystem shares.
 ///
-/// Applies user flags in fixed group order: `--share-rw`, then
-/// `--share-ro`. When the same path appears in multiple groups, the
-/// later group wins (`--share-ro` > `--share-rw`).
-fn compute_shares(share_rw: &[PathBuf], share_ro: &[PathBuf]) -> Vec<(PathBuf, ShareAction)> {
-  // We process groups in fixed order: --share-rw first, then
+/// Starts with defaults (cwd rw, /tmp rw), then applies user flags
+/// in fixed group order: `--share-rw`, then `--share-ro`. When the
+/// same path appears in multiple groups, the later group wins
+/// (`--share-ro` > `--share-rw`).
+///
+/// Returns the list of `(path, action)` pairs and whether the root
+/// should be read-only (false only if `--share-rw /` was given).
+fn compute_shares(
+  cwd: &Path,
+  share_rw: &[PathBuf],
+  share_ro: &[PathBuf],
+) -> (Vec<(PathBuf, ShareAction)>, bool) {
+  // We process groups in fixed order: defaults, then --share-rw, then
   // --share-ro. Inside each group, later entries win.
   let mut entries = Vec::<(PathBuf, ShareAction)>::new();
+
+  // Apply defaults: cwd and /tmp writable.
+  let () = entries.push((cwd.to_path_buf(), ShareAction::ReadWrite));
+  let () = entries.push((PathBuf::from("/tmp"), ShareAction::ReadWrite));
 
   for path in share_rw {
     let () = entries.push((path.clone(), ShareAction::ReadWrite));
@@ -82,7 +95,18 @@ fn compute_shares(share_rw: &[PathBuf], share_ro: &[PathBuf]) -> Vec<(PathBuf, S
   }
   let () = deduped.reverse();
 
-  deduped
+  // The root path is always handled via the root virtiofs device
+  // (krun_add_virtiofs3 with KRUN_FS_ROOT_TAG), so remove it from the
+  // per-share list and derive the read-only flag from the action.
+  let root = Path::new("/");
+  let root_action = deduped
+    .iter()
+    .find(|(p, _)| p == root)
+    .map(|(_, a)| a.clone());
+  let () = deduped.retain(|(p, _)| p != root);
+  let root_read_only = !matches!(root_action, Some(ShareAction::ReadWrite));
+
+  (deduped, root_read_only)
 }
 
 
@@ -109,6 +133,11 @@ fn format_shares_env(shares: &[(PathBuf, ShareAction)]) -> Vec<u8> {
   out
 }
 
+
+/// The virtiofs tag used by libkrun for the root filesystem device.
+///
+/// Corresponds to `KRUN_FS_ROOT_TAG` in `libkrun.h`.
+const KRUN_FS_ROOT_TAG: &CStr = c"/dev/root";
 
 /// Embedded init binary.
 const INIT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmsh-init"));
@@ -423,14 +452,30 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
 
   let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
 
-  let c_rootfs = c"/";
-  // SAFETY: `ctx` is a valid krun context and `c_rootfs` is a valid
-  //         NUL-terminated string.
-  let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
-  ensure!(rc >= 0, "failed to set root filesystem");
+  // Compute filesystem shares. By default, the root is read-only with
+  // the cwd and /tmp shared read-write. User flags override this.
+  let cwd = env::current_dir()
+    .and_then(|p| p.canonicalize())
+    .context("failed to determine current directory")?;
+  let (shares, root_read_only) = compute_shares(&cwd, &share_rw, &share_ro);
 
-  // Compute additional virtiofs shares from --share-rw / --share-ro.
-  let shares = compute_shares(&share_rw, &share_ro);
+  // Set up the root filesystem via the well-known root virtiofs tag.
+  // By default the root is read-only; `--share-rw /` makes it rw.
+  let c_rootfs = c"/";
+  // Use the same 512 MiB DAX window that `krun_set_root` uses.
+  const ROOT_SHM_SIZE: u64 = 1 << 29;
+  // SAFETY: `ctx` is a valid krun context, `KRUN_FS_ROOT_TAG` and
+  //         `c_rootfs` are valid NUL-terminated strings.
+  let rc = unsafe {
+    krun::krun_add_virtiofs3(
+      ctx,
+      KRUN_FS_ROOT_TAG.as_ptr(),
+      c_rootfs.as_ptr(),
+      ROOT_SHM_SIZE,
+      root_read_only,
+    )
+  };
+  ensure!(rc >= 0, "failed to set root filesystem");
 
   // Add virtiofs devices for each share.
   for (idx, (path, action)) in shares.iter().enumerate() {
@@ -451,6 +496,13 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
       path.display()
     );
   }
+
+  // Set the working directory to the host cwd.
+  let c_workdir = CString::new(cwd.as_os_str().as_bytes())?;
+  // SAFETY: `ctx` is a valid krun context and `c_workdir` is a valid
+  //         NUL-terminated string.
+  let rc = unsafe { krun::krun_set_workdir(ctx, c_workdir.as_ptr()) };
+  ensure!(rc >= 0, "failed to set working directory");
 
   // Pass environment variables to the guest via a virtio console port
   // backed by a memfd. The guest init discovers the port by name and
@@ -676,17 +728,35 @@ mod tests {
   }
 
 
+  /// Default shares include cwd (rw) and /tmp (rw), with root as ro.
+  #[test]
+  fn default_shares() {
+    let cwd = PathBuf::from("/home/user/project");
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[]);
+    assert!(root_ro);
+    assert_eq!(shares.len(), 2);
+    assert_eq!(
+      shares[0],
+      (PathBuf::from("/home/user/project"), ShareAction::ReadWrite)
+    );
+    assert_eq!(shares[1], (PathBuf::from("/tmp"), ShareAction::ReadWrite));
+  }
+
   /// `--share-rw /data` adds an rw entry.
   #[test]
   fn share_rw_adds_path() {
-    let shares = compute_shares(&[PathBuf::from("/data")], &[]);
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/data")], &[]);
+    assert!(root_ro);
     assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
   }
 
   /// `--share-ro /opt` adds an ro entry.
   #[test]
   fn share_ro_adds_path() {
-    let shares = compute_shares(&[], &[PathBuf::from("/opt")]);
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/opt")]);
+    assert!(root_ro);
     assert!(shares.contains(&(PathBuf::from("/opt"), ShareAction::ReadOnly)));
   }
 
@@ -694,9 +764,30 @@ mod tests {
   /// (since --share-ro group comes after --share-rw).
   #[test]
   fn last_wins_same_flag_type() {
-    let shares = compute_shares(&[PathBuf::from("/data")], &[PathBuf::from("/data")]);
+    let cwd = PathBuf::from("/home/user");
+    let (shares, _) = compute_shares(&cwd, &[PathBuf::from("/data")], &[PathBuf::from("/data")]);
     assert!(shares.contains(&(PathBuf::from("/data"), ShareAction::ReadOnly)));
     assert!(!shares.contains(&(PathBuf::from("/data"), ShareAction::ReadWrite)));
+  }
+
+  /// `--share-rw /` disables isolation (root is rw).
+  #[test]
+  fn share_rw_root_disables_isolation() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[PathBuf::from("/")], &[]);
+    assert!(!root_ro);
+    // The "/" entry itself is removed from shares.
+    assert!(!shares.iter().any(|(p, _)| p == Path::new("/")));
+  }
+
+  /// `--share-ro /` is a no-op: root is already read-only and no
+  /// redundant share entry is produced.
+  #[test]
+  fn share_ro_root_is_noop() {
+    let cwd = PathBuf::from("/home/user");
+    let (shares, root_ro) = compute_shares(&cwd, &[], &[PathBuf::from("/")]);
+    assert!(root_ro);
+    assert!(!shares.iter().any(|(p, _)| p == Path::new("/")));
   }
 
   /// Verify the `VMSH_SHARES` env var format.

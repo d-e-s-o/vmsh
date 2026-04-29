@@ -549,10 +549,6 @@ fn main() {
   const TSI_WARNING: &str = "vmsh-init: warning: kernel does not support TSI networking; \
    use a TSI-patched kernel or omit --net argument to vmsh";
 
-  // Remove temporary files early -- the host code won't get a chance
-  // because libkrun exits the process hard on VM exit.
-  let () = unlink_temp_files();
-
   // Set up shared mount propagation on root.
   let () = mount_or_warn(
     None,
@@ -598,7 +594,16 @@ fn main() {
 
   // Bring up loopback interface.
   let () = bring_up_loopback();
+
+  // Mount virtiofs shares first so that /tmp (and other paths) become
+  // writable. This must happen before unlink/load_env_vars, because the
+  // root filesystem may be read-only and those files live in /tmp.
   let () = mount_shares();
+
+  // Remove temporary files now that rw shares are mounted. We must do
+  // this on the guest side because libkrun exits the host process hard
+  // on VM exit, so the host-side RAII cleanup never runs.
+  let () = unlink_temp_files();
   let () = load_env_vars();
 
   // Set hostname.
