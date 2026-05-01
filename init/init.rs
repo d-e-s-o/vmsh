@@ -2,6 +2,8 @@
 
 use std::env;
 use std::ffi::CStr;
+use std::ffi::CString;
+use std::ffi::OsString;
 use std::ffi::c_char;
 use std::ffi::c_int;
 use std::ffi::c_short;
@@ -15,6 +17,8 @@ use std::io::BufRead as _;
 use std::io::BufReader;
 use std::mem;
 use std::mem::MaybeUninit;
+use std::os::unix::ffi::OsStrExt as _;
+use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::os::unix::fs::symlink;
 use std::os::unix::io::AsRawFd as _;
@@ -31,24 +35,40 @@ use libc::_exit;
 use libc::AF_INET;
 use libc::EBUSY;
 use libc::ENOENT;
+use libc::F_GETFD;
 use libc::IFF_UP;
 use libc::MS_NODEV;
 use libc::MS_NOEXEC;
 use libc::MS_NOSUID;
+use libc::MS_REC;
 use libc::MS_RELATIME;
+use libc::MS_SHARED;
+use libc::RB_AUTOBOOT;
 use libc::SIOCSIFFLAGS;
 use libc::SOCK_DGRAM;
 use libc::STDERR_FILENO;
 use libc::STDIN_FILENO;
 use libc::STDOUT_FILENO;
+use libc::TIOCSCTTY;
+use libc::WEXITSTATUS;
+use libc::WIFEXITED;
+use libc::WIFSIGNALED;
+use libc::WTERMSIG;
 use libc::close;
 use libc::dup2;
 use libc::execvp;
+use libc::fcntl;
+use libc::fork;
 use libc::ifreq;
 use libc::ioctl;
 use libc::mount;
+use libc::reboot;
+use libc::sethostname;
+use libc::setsid;
 use libc::socket;
 use libc::statfs;
+use libc::sync;
+use libc::waitpid;
 
 
 /// Ioctl number used by libkrun's virtiofs to communicate exit codes.
@@ -58,12 +78,10 @@ const KRUN_EXIT_CODE_IOCTL: c_ulong = 0x7602;
 const VIRTIOFS_MAGIC: c_ulong = 0x6573_5546;
 
 
-#[allow(dead_code)]
 fn mkdir_p(path: &str) {
   let _ = DirBuilder::new().mode(0o755).create(path);
 }
 
-#[allow(dead_code)]
 fn mount_or_err(
   source: &CStr,
   target: &CStr,
@@ -97,7 +115,6 @@ fn mount_or_err(
 }
 
 /// Mount with a warning on failure (non-fatal).
-#[allow(dead_code)]
 fn mount_or_warn(
   source: Option<&CStr>,
   target: &CStr,
@@ -116,7 +133,6 @@ fn mount_or_warn(
 }
 
 /// Check whether the kernel supports a filesystem type.
-#[allow(dead_code)]
 fn kernel_supports_fs(fstype: &str) -> bool {
   let content = match fs::read_to_string("/proc/filesystems") {
     Ok(c) => c,
@@ -135,7 +151,6 @@ fn kernel_supports_fs(fstype: &str) -> bool {
 }
 
 /// Mount various filesystems.
-#[allow(dead_code)]
 fn mount_filesystems() -> Result<(), io::Error> {
   // Create level-1 directories.
   let () = mkdir_p("/dev");
@@ -200,7 +215,6 @@ fn mount_filesystems() -> Result<(), io::Error> {
 }
 
 /// Try to bring up the loopback device.
-#[allow(dead_code)]
 fn bring_up_loopback() {
   // SAFETY: Creating a UDP socket is always safe.
   let sockfd = unsafe { socket(AF_INET, SOCK_DGRAM, 0) };
@@ -227,7 +241,6 @@ fn bring_up_loopback() {
 /// matches `target_name`. It returns the device path (e.g.
 /// `/dev/vport0p1`) on success, polling up to `max_attempts` times, 1
 /// ms apart.
-#[allow(dead_code)]
 fn find_virtio_port(target_name: &str, max_attempts: i32) -> Option<PathBuf> {
   let base = Path::new("/sys/class/virtio-ports");
   for attempt in 0..max_attempts {
@@ -256,7 +269,6 @@ fn find_virtio_port(target_name: &str, max_attempts: i32) -> Option<PathBuf> {
 }
 
 
-#[allow(dead_code)]
 fn set_exit_code(code: c_int) {
   let mut buf = MaybeUninit::<statfs>::uninit();
   // SAFETY: "/" is a valid NUL-terminated path and `buf` is writable.
@@ -290,7 +302,6 @@ fn set_exit_code(code: c_int) {
 /// pass bulk env vars (other than `VMSH_*`) through a dedicated virtio
 /// console port backed by a memfd on the host. The file format is one
 /// `KEY=VALUE` per line.
-#[allow(dead_code)]
 fn load_env_vars() {
   if env::var_os("VMSH_ENV_PORT").is_none() {
     return;
@@ -329,7 +340,6 @@ fn load_env_vars() {
 /// descriptors have been redirected and need a corresponding virtio
 /// console port. Each port is discovered and `dup2`'d onto the
 /// corresponding file descriptor.
-#[allow(dead_code)]
 fn setup_redirects() {
   #[derive(Clone, Copy)]
   struct Redirect {
@@ -416,7 +426,6 @@ fn setup_redirects() {
 }
 
 
-#[allow(dead_code)]
 fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
   // SAFETY: `exec_path` and `exec_argv` are valid NUL-terminated
   // strings. `exec_argv` is NULL-terminated.
@@ -440,7 +449,6 @@ fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
 
 
 /// Delete colon-separated paths listed in `VMSH_UNLINK`.
-#[allow(dead_code)]
 fn unlink_temp_files() {
   let list = match env::var("VMSH_UNLINK") {
     Ok(l) => l,
@@ -453,4 +461,151 @@ fn unlink_temp_files() {
 }
 
 
-fn main() {}
+fn main() {
+  const TSI_WARNING: &str = "vmsh-init: warning: kernel does not support TSI networking; \
+   use a TSI-patched kernel or omit --net argument to vmsh";
+
+  // Remove temporary files early -- the host code won't get a chance
+  // because libkrun exits the process hard on VM exit.
+  let () = unlink_temp_files();
+
+  // Set up shared mount propagation on root.
+  let () = mount_or_warn(
+    None,
+    c"/",
+    None,
+    MS_REC | MS_SHARED,
+    "shared propagation on /",
+  );
+
+  // Mount essential filesystems.
+  if let Err(err) = mount_filesystems() {
+    eprintln!("vmsh-init: failed to mount filesystems: {err}");
+    let () = set_exit_code(125);
+    // SAFETY: Exiting the process is always safe.
+    unsafe { _exit(125) }
+  }
+
+  // Ensure FDs 0, 1, 2 are valid. The kernel may fail to open
+  // `/dev/console` at boot, leaving them closed. Fill any invalid slot
+  // with `/dev/null` so child processes never inherit bad file
+  // descriptors.
+  for fd in 0..=2 {
+    // SAFETY: `fcntl` with `F_GETFD` is always safe.
+    let rc = unsafe { fcntl(fd, F_GETFD) };
+    if rc < 0 {
+      let result = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/null");
+      if let Ok(file) = result
+        && file.as_raw_fd() != fd
+      {
+        // SAFETY: Both file descriptors are valid.
+        let _rc = unsafe { dup2(file.as_raw_fd(), fd) };
+      }
+    }
+  }
+
+  // Create new session and set controlling terminal.
+  // SAFETY: `setsid` and `ioctl` are always safe to call here.
+  let _rc = unsafe { setsid() };
+  let _rc = unsafe { ioctl(0, TIOCSCTTY, 1) };
+
+  // Bring up loopback interface.
+  let () = bring_up_loopback();
+  let () = load_env_vars();
+
+  // Set hostname.
+  let hostname = env::var_os("HOSTNAME").unwrap_or_else(|| OsString::from("localhost"));
+  // SAFETY: `hostname` is a valid pointer. `sethostname` does not
+  //         require NUL termination.
+  let _rc = unsafe { sethostname(hostname.as_bytes().as_ptr().cast(), hostname.len()) };
+
+  // Apply HOME and TERM from KRUN_ prefixed env vars.
+  if let Ok(home) = env::var("KRUN_HOME") {
+    let () = unsafe { env::set_var("HOME", &home) };
+  }
+  if let Ok(term) = env::var("KRUN_TERM") {
+    let () = unsafe { env::set_var("TERM", &term) };
+  }
+
+  // Determine working directory.
+  if let Ok(workdir) = env::var("KRUN_WORKDIR") {
+    let _result = env::set_current_dir(&workdir);
+  }
+
+  // Determine the command to run.
+  let c_krun_init = env::var_os("KRUN_INIT")
+    .map(|s| CString::new(s.into_vec()).expect("KRUN_INIT contains NUL"))
+    .unwrap_or_else(|| c"/bin/sh".into());
+
+  // Build argv: krun_init plus any remaining args.
+  // Filter out `tsi_hijack` and `tsi_hijack_unix` arguments. These are
+  // kernel command line parameters for TSI (Transparent Socket
+  // Impersonation). When the kernel lacks TSI patches it passes them
+  // through to init as regular arguments.
+  let mut tsi_warning = false;
+  let mut exec_argv_owned = vec![c_krun_init];
+  for arg in env::args().skip(1) {
+    if arg == "tsi_hijack" || arg == "tsi_hijack_unix" {
+      tsi_warning = true;
+      continue;
+    }
+    let () = exec_argv_owned.push(CString::new(arg).expect("argument contains NUL"));
+  }
+
+  let mut exec_argv = exec_argv_owned
+    .iter()
+    .map(|a| a.as_ptr())
+    .collect::<Vec<*const c_char>>();
+  let () = exec_argv.push(ptr::null());
+
+  // Fork: child exec's the command, parent waits and reports exit code.
+  // SAFETY: `fork` is safe to call.
+  let child_pid = unsafe { fork() };
+  if child_pid < 0 {
+    eprintln!("vmsh-init: fork failed");
+    let () = set_exit_code(125);
+    // SAFETY: Exiting the process is always safe.
+    unsafe { _exit(125) };
+  }
+
+  if child_pid == 0 {
+    // Child process.
+    let () = setup_redirects();
+    if tsi_warning {
+      eprintln!("{TSI_WARNING}");
+    }
+    do_exec(&exec_argv_owned[0], &exec_argv)
+  }
+
+  // Parent (PID 1): wait for the child.
+  let mut status = 0;
+  loop {
+    // SAFETY: `waitpid` with -1 waits for any child.
+    let ret = unsafe { waitpid(-1, &mut status, 0) };
+    if ret == child_pid || ret < 0 {
+      break;
+    }
+  }
+
+  let exit_code = if WIFEXITED(status) {
+    WEXITSTATUS(status)
+  } else if WIFSIGNALED(status) {
+    WTERMSIG(status) + 128
+  } else {
+    125
+  };
+
+  let () = set_exit_code(exit_code);
+
+  // PID 1 must not exit (kernel panics). Power off the VM:
+  // - use `RB_AUTOBOOT` which triggers a reboot
+  // - that goes through the `reboot=k` path (i8042 reset)
+  // - this is how libkrun detects the guest wants to exit
+  // SAFETY: `sync` is always safe to call.
+  let () = unsafe { sync() };
+  // SAFETY: `reboot` is always safe to call.
+  let _rc = unsafe { reboot(RB_AUTOBOOT) };
+}
