@@ -1,5 +1,6 @@
 //! Minimal init process for vmsh.
 
+use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
 use std::ffi::CString;
@@ -78,6 +79,30 @@ const KRUN_EXIT_CODE_IOCTL: c_ulong = 0x7602;
 const VIRTIOFS_MAGIC: c_ulong = 0x6573_5546;
 
 
+/// A cache of the filesystem types supported by the running kernel.
+struct FsCache {
+  types: HashSet<String>,
+}
+
+impl FsCache {
+  /// Parse `/proc/filesystems` and collect the supported types.
+  fn read() -> Self {
+    let content = fs::read_to_string("/proc/filesystems").unwrap_or_default();
+    let types = content
+      .lines()
+      // Each line is either "nodev\t<fstype>" or "\t<fstype>".
+      .filter_map(|line| line.split_once('\t').map(|(_, n)| n.to_owned()))
+      .collect();
+    Self { types }
+  }
+
+  /// Check whether filesystems of type `fstype` are supported.
+  fn supports(&self, fstype: &str) -> bool {
+    self.types.contains(fstype)
+  }
+}
+
+
 fn mkdir_p(path: &str) {
   let _ = DirBuilder::new().mode(0o755).create(path);
 }
@@ -132,23 +157,6 @@ fn mount_or_warn(
   }
 }
 
-/// Check whether the kernel supports a filesystem type.
-fn kernel_supports_fs(fstype: &str) -> bool {
-  let content = match fs::read_to_string("/proc/filesystems") {
-    Ok(c) => c,
-    Err(_) => return false,
-  };
-
-  for line in content.lines() {
-    // Each line is either "nodev\t<fstype>" or "\t<fstype>".
-    if let Some(name) = line.split_once('\t').map(|(_, n)| n)
-      && name == fstype
-    {
-      return true;
-    }
-  }
-  false
-}
 
 /// Mount various filesystems.
 fn mount_filesystems() -> Result<(), io::Error> {
@@ -162,7 +170,8 @@ fn mount_filesystems() -> Result<(), io::Error> {
   let () = mount_or_err(c"proc", c"/proc", c"proc", flags)?;
   let () = mount_or_err(c"sysfs", c"/sys", c"sysfs", flags)?;
 
-  if kernel_supports_fs("debugfs") {
+  let fs_cache = FsCache::read();
+  if fs_cache.supports("debugfs") {
     let () = mkdir_p("/sys/kernel/debug");
     let () = mount_or_warn(
       Some(c"debugfs"),
@@ -173,7 +182,7 @@ fn mount_filesystems() -> Result<(), io::Error> {
     );
   }
 
-  if kernel_supports_fs("tracefs") {
+  if fs_cache.supports("tracefs") {
     let () = mkdir_p("/sys/kernel/tracing");
     let () = mount_or_warn(
       Some(c"tracefs"),
@@ -184,7 +193,7 @@ fn mount_filesystems() -> Result<(), io::Error> {
     );
   }
 
-  if kernel_supports_fs("bpf") {
+  if fs_cache.supports("bpf") {
     let () = mkdir_p("/sys/fs/bpf");
     let () = mount_or_warn(Some(c"bpffs"), c"/sys/fs/bpf", Some(c"bpf"), flags, "bpffs");
   }
