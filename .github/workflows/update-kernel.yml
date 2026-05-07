@@ -1,0 +1,68 @@
+name: Update kernel
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  bump:
+    name: Bump stable kernel pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.WORKFLOW_UPDATE_TOKEN }}
+      - name: Discover latest stable tag
+        id: discover
+        shell: bash
+        run: |
+          set -eou pipefail
+          wf=.github/workflows/build-kernel.yml
+          repo=$(grep --only-matching --perl-regexp "kernel-repo: '\K[^']+" "$wf" | head --lines=1)
+          current=$(grep --only-matching --perl-regexp "rev: 'v\K[^']+" "$wf" | head --lines=1)
+          series=${current%.*}
+          latest=$(git ls-remote --tags --refs \
+                     "https://github.com/${repo}" "v${series}.*" \
+                   | awk --field-separator=/ '{print $NF}' \
+                   | sort --version-sort \
+                   | tail --lines=1)
+          latest=${latest#v}
+          echo "current=${current}" >> "$GITHUB_OUTPUT"
+          echo "latest=${latest}" >> "$GITHUB_OUTPUT"
+          echo "Current: v${current}; latest: v${latest}"
+      - name: Apply bump
+        if: steps.discover.outputs.latest != steps.discover.outputs.current
+        shell: bash
+        run: |
+          set -eou pipefail
+          old='${{ steps.discover.outputs.current }}'
+          new='${{ steps.discover.outputs.latest }}'
+          sed --in-place "s|rev: 'v${old}'|rev: 'v${new}'|" \
+            .github/workflows/build-kernel.yml \
+            .github/workflows/test.yml
+      - name: Open PR
+        if: steps.discover.outputs.latest != steps.discover.outputs.current
+        env:
+          GH_TOKEN: ${{ secrets.WORKFLOW_UPDATE_TOKEN }}
+          NEW: ${{ steps.discover.outputs.latest }}
+          OLD: ${{ steps.discover.outputs.current }}
+        shell: bash
+        run: |
+          set -eou pipefail
+          branch="topic/bump-kernel-v${NEW}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git switch --force-create "${branch}"
+          git commit --all --message "Bump CI kernel to v${NEW}"
+          git push --force-with-lease origin "${branch}"
+          gh pr view "${branch}" >/dev/null 2>&1 || \
+            gh pr create \
+              --base "${GITHUB_REF_NAME}" \
+              --head "${branch}" \
+              --title "Bump CI kernel to v${NEW}" \
+              --body "Bump the stable kernel pin from \`v${OLD}\` to \`v${NEW}\` to get the latest and greatest."
