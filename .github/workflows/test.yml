@@ -48,7 +48,10 @@ jobs:
       - run: sudo chmod 666 /dev/kvm
       - name: Test
         run: |
-          VMSH_KERNEL="${{ steps.build.outputs.build-dir }}/boot/vmlinux-6.18.26+" cargo test --workspace --all-features -- --include-ignored
+          shopt -s nullglob
+          files=("${{ steps.build.outputs.build-dir }}"/boot/vmlinux-*)
+          [[ ${#files[@]} -eq 1 ]] || { echo "expected exactly one vmlinux, got ${files[*]}"; exit 1; }
+          VMSH_KERNEL="${files[0]}" cargo test --workspace --all-features -- --include-ignored
   clippy:
     name: Lint with clippy
     runs-on: ubuntu-latest
