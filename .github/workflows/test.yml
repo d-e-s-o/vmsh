@@ -38,7 +38,8 @@ jobs:
       - uses: d-e-s-o/build-linux@a2c2581c6b44879b6070699618be648480a122c5
         id: build
         with:
-          rev: 'v6.18'
+          kernel-repo: 'gregkh/linux'
+          rev: 'v6.18.26'
           config: 'var/linux-config-minimal'
           vmlinux: 'true'
           patches: |
@@ -47,7 +48,7 @@ jobs:
       - run: sudo chmod 666 /dev/kvm
       - name: Test
         run: |
-          VMSH_KERNEL="${{ steps.build.outputs.build-dir }}/boot/vmlinux-6.18.0+" cargo test --workspace --all-features -- --include-ignored
+          VMSH_KERNEL="${{ steps.build.outputs.build-dir }}/boot/vmlinux-6.18.26+" cargo test --workspace --all-features -- --include-ignored
   clippy:
     name: Lint with clippy
     runs-on: ubuntu-latest
