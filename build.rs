@@ -62,7 +62,7 @@ fn build_init(manifest_dir: &Path) {
   let _cnt =
     fs::copy(&built, &init_bin).unwrap_or_else(|e| panic!("failed to copy init binary: {e}"));
 
-  println!("cargo:rerun-if-changed=init/main.rs");
+  println!("cargo:rerun-if-changed=init/init.rs");
   println!("cargo:rerun-if-changed=init/Cargo.toml");
 }
 
