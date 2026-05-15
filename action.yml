@@ -21,6 +21,7 @@ runs:
       if: steps.cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        KRUN_INIT_BINARY_PATH="${{ github.action_path }}/Cargo.toml" \
         cargo build \
           --release \
           --manifest-path "${{ github.action_path }}/Cargo.toml" \
