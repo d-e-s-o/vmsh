@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::env;
+use std::env::home_dir;
 use std::fs;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -494,6 +495,21 @@ fn hostname_setting() {
   let host_name = hostname().unwrap();
   let stdout = String::from_utf8_lossy(&output.stdout);
   assert_eq!(stdout.trim(), host_name);
+}
+
+/// Make sure that the `HOME` variable is set correctly.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn home_setting() {
+  let output = Vm::new().run(&["/bin/sh", "-c", "echo $HOME"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(Path::new(stdout.trim()), home_dir().unwrap());
 }
 
 /// Test that `--all-envs` forwards host env vars to the guest.

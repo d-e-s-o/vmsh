@@ -7,6 +7,7 @@ use std::cell::LazyCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::env;
+use std::env::home_dir;
 use std::env::temp_dir;
 use std::ffi::CString;
 use std::ffi::OsStr;
@@ -189,10 +190,16 @@ fn set_exec(
   unlink_paths: &[&Path],
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
-  // overwritten by any user provided values (present on the env port).
+  // overwritten by any user provided values.
   let hostname = hostname().context("failed to retrieve host name")?;
   let hostname = CString::new(format!("HOSTNAME={hostname}")).unwrap();
-  let home = c"HOME=/root";
+  let home_owned;
+  let home = if let Some(home_dir) = home_dir() {
+    home_owned = CString::new(format!("HOME={}", home_dir.display())).unwrap();
+    &home_owned
+  } else {
+    c"/root"
+  };
 
   // Determine which of stdin/stdout/stderr are non-terminal.
   // `libkrun` creates virtio console ports for redirected FDs; tell the
