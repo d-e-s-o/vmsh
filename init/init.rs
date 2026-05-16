@@ -104,7 +104,7 @@ impl FsCache {
 
 
 fn mkdir_p(path: &str) {
-  let _ = DirBuilder::new().mode(0o755).create(path);
+  let _result = DirBuilder::new().mode(0o755).create(path);
 }
 
 fn mount_or_err(
@@ -337,6 +337,7 @@ fn load_env_vars() {
     }
 
     if let Some((key, value)) = line.split_once('=') {
+      // SAFETY: We are in a single-threaded context.
       let () = unsafe { env::set_var(key, value) };
     }
   }
@@ -517,8 +518,9 @@ fn main() {
   }
 
   // Create new session and set controlling terminal.
-  // SAFETY: `setsid` and `ioctl` are always safe to call here.
+  // SAFETY: `setsid` is always safe to call.
   let _rc = unsafe { setsid() };
+  // SAFETY: `ioctl` is always safe to call.
   let _rc = unsafe { ioctl(0, TIOCSCTTY, 1) };
 
   // Bring up loopback interface.
@@ -533,9 +535,11 @@ fn main() {
 
   // Apply HOME and TERM from KRUN_ prefixed env vars.
   if let Ok(home) = env::var("KRUN_HOME") {
+    // SAFETY: We are in a single-threaded context.
     let () = unsafe { env::set_var("HOME", &home) };
   }
   if let Ok(term) = env::var("KRUN_TERM") {
+    // SAFETY: We are in a single-threaded context.
     let () = unsafe { env::set_var("TERM", &term) };
   }
 
