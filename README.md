@@ -30,7 +30,7 @@ $ vmsh --all-envs -k <vmlinux> -- make -j4
 Requirements
 ------------
 
-- Rust and C toolchains
+- Rust and C toolchains (including static `libc` archive)
 - Linux host with `/dev/kvm` access
 - A Linux kernel image in vmlinux (ELF) format, optionally compressed
   with gzip, bzip2, or zstd
