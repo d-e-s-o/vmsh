@@ -45,6 +45,9 @@ jobs:
           patches: |
             var/linux-patches/6.18-*
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
       - run: sudo chmod 666 /dev/kvm
       - name: Test
         run: |
