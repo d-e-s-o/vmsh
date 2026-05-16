@@ -74,6 +74,7 @@ libkrun = { version = "1.18" }
 _vm-memory_unused = { package = "vm-memory", version = "=0.17.1" }
 
 [dev-dependencies]
+libc = { version = "0.2" }
 tempfile = { version = "3", default-features = false }
 vmsh = { path = ".", features = ["test"] }
 

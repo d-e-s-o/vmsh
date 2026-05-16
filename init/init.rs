@@ -36,7 +36,6 @@ use libc::_exit;
 use libc::AF_INET;
 use libc::EBUSY;
 use libc::ENOENT;
-use libc::F_GETFD;
 use libc::IFF_UP;
 use libc::MS_NODEV;
 use libc::MS_NOEXEC;
@@ -58,7 +57,6 @@ use libc::WTERMSIG;
 use libc::close;
 use libc::dup2;
 use libc::execvp;
-use libc::fcntl;
 use libc::fork;
 use libc::ifreq;
 use libc::ioctl;
@@ -496,21 +494,26 @@ fn main() {
     unsafe { _exit(125) }
   }
 
-  // Ensure FDs 0, 1, 2 are valid. The kernel may fail to open
-  // `/dev/console` at boot, leaving them closed. Fill any invalid slot
-  // with `/dev/null` so child processes never inherit bad file
-  // descriptors.
-  for fd in 0..=2 {
-    // SAFETY: `fcntl` with `F_GETFD` is always safe.
-    let rc = unsafe { fcntl(fd, F_GETFD) };
-    if rc < 0 {
-      let result = fs::OpenOptions::new()
+  // Reopen fds 0, 1, 2 onto `/dev/console`. The kernel opens
+  // `/dev/console` very early (before devtmpfs is mounted) and on a
+  // virtiofs rootfs that may yield an FD that does not behave as a TTY.
+  // Reopening here, after devtmpfs is mounted and `/dev/console` is a
+  // real char device, gives child processes a usable controlling
+  // terminal.
+  let console = fs::OpenOptions::new()
+    .read(true)
+    .write(true)
+    .open("/dev/console")
+    .or_else(|_| {
+      fs::OpenOptions::new()
         .read(true)
         .write(true)
-        .open("/dev/null");
-      if let Ok(file) = result
-        && file.as_raw_fd() != fd
-      {
+        .open("/dev/null")
+    });
+
+  if let Ok(file) = console {
+    for fd in 0..=2 {
+      if file.as_raw_fd() != fd {
         // SAFETY: Both file descriptors are valid.
         let _rc = unsafe { dup2(file.as_raw_fd(), fd) };
       }

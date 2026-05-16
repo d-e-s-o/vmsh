@@ -4,9 +4,13 @@ use std::borrow::Cow;
 use std::env;
 use std::env::home_dir;
 use std::fs;
+use std::fs::File;
+use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::net::TcpListener;
+use std::os::unix::io::FromRawFd as _;
+use std::os::unix::io::OwnedFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::path::PathBuf;
@@ -15,6 +19,7 @@ use std::process::Child;
 use std::process::Command;
 use std::process::Output;
 use std::process::Stdio;
+use std::ptr;
 use std::thread::spawn;
 
 use tempfile::NamedTempFile;
@@ -460,6 +465,80 @@ fn dev_stdin_stdout_stderr_symlinks() {
     lines,
     &["/proc/self/fd/0", "/proc/self/fd/1", "/proc/self/fd/2"],
     "symlinks should point to /proc/self/fd/{{0,1,2}}, got: {lines:?}",
+  );
+}
+
+/// Verify that with a real TTY on the host, the guest sees fd 0 as a
+/// working TTY (`/dev/console`).
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn interactive_tty_is_console() {
+  let mut master = -1;
+  let mut slave = -1;
+  // SAFETY: FD pointers come from references and remaining NULL
+  //         pointers are acceptable as per contract.
+  let rc = unsafe {
+    libc::openpty(
+      &mut master,
+      &mut slave,
+      ptr::null_mut(),
+      ptr::null(),
+      ptr::null(),
+    )
+  };
+  assert_eq!(rc, 0, "openpty failed: {}", io::Error::last_os_error(),);
+  // SAFETY: `openpty` succeeded, so both fds are valid and owned.
+  let master = unsafe { OwnedFd::from_raw_fd(master) };
+  // SAFETY: `openpty` succeeded, so both fds are valid and owned.
+  let slave = unsafe { OwnedFd::from_raw_fd(slave) };
+
+  // Manufacture out own `Command` here, similar to what `Vm` does. The
+  // important thing is that we do not want to use `Stdio::piped()`,
+  // which causes libkrun to create `krun-std{in,out,err}` virtio ports
+  // and init to `dup2` those onto fd 0/1/2 in the child -- bypassing
+  // the `/dev/console` reopen. To hit the `/dev/console` path we have
+  // to hand in a real TTY, which we fabricate with `openpty(3)`.
+  let vm = Vm::new();
+  let mut cmd = Command::new(vm.vmsh_path().as_os_str());
+  let () = vm.apply_env(&mut cmd);
+  let mut child = cmd
+    .arg("--kernel")
+    .arg(vm.kernel_path().unwrap().as_os_str())
+    .arg("--")
+    .arg("/usr/bin/tty")
+    .stdin(slave.try_clone().unwrap())
+    .stdout(slave.try_clone().unwrap())
+    .stderr(slave)
+    .spawn()
+    .expect("failed to spawn vmsh");
+
+  // Drop the `Command` so any slave fds still held by its `Stdio`
+  // configuration are closed; otherwise the parent keeps the slave open
+  // and the master never sees EOF after the child exits.
+  drop(cmd);
+
+  // Drain the master in a thread. Both guest and libkrun may write here
+  // and we must keep reading until the slave closes (which happens when
+  // the child exits) or `read` returns `EIO`.
+  let reader = spawn(move || {
+    let mut buf = Vec::new();
+    let mut master = File::from(master);
+    let _result = master.read_to_end(&mut buf);
+    buf
+  });
+
+  let status = child.wait().expect("wait failed");
+  let output = reader.join().expect("reader panicked");
+  let output_str = String::from_utf8_lossy(&output);
+
+  assert!(
+    status.success(),
+    "tty exited with {:?}; output:\n{output_str}",
+    status.code(),
+  );
+  assert!(
+    output_str.contains("/dev/console"),
+    "expected `/dev/console` in tty output, got: {output_str:?}",
   );
 }
 
