@@ -8,3 +8,4 @@ mod util;
 
 pub use util::KernelFormat;
 pub use util::detect_kernel_format;
+pub use util::hostname;

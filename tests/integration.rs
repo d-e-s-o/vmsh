@@ -20,6 +20,7 @@ use tempfile::NamedTempFile;
 use tempfile::TempDir;
 
 use vmsh::KernelFormat;
+use vmsh::hostname;
 
 
 /// Builder for running commands inside a VM.
@@ -477,6 +478,22 @@ fn loopback_device() {
     stdout.trim() == "up" || stdout.trim() == "unknown",
     "loopback should be 'up' or 'unknown', got: {stdout:?}",
   );
+}
+
+/// Check that `vmsh` correctly sets the host name.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn hostname_setting() {
+  let output = Vm::new().run(&["/usr/bin/hostname"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let host_name = hostname().unwrap();
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout.trim(), host_name);
 }
 
 /// Test that `--all-envs` forwards host env vars to the guest.

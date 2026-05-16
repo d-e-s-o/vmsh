@@ -36,6 +36,7 @@ use anyhow::ensure;
 use clap::Parser;
 
 use vmsh::detect_kernel_format;
+use vmsh::hostname;
 
 use crate::args::Args;
 use crate::args::Command;
@@ -189,7 +190,8 @@ fn set_exec(
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values (present on the env port).
-  let hostname = c"HOSTNAME=krun-boot";
+  let hostname = hostname().context("failed to retrieve host name")?;
+  let hostname = CString::new(format!("HOSTNAME={hostname}")).unwrap();
   let home = c"HOME=/root";
 
   // Determine which of stdin/stdout/stderr are non-terminal.
