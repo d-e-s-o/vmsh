@@ -235,13 +235,7 @@ fn set_exec(
   if stderr_redir {
     let () = env_ptrs.push(c"VMSH_STDERR=1".as_ptr());
   }
-
   let () = env_ptrs.push(ptr::null());
-
-  // SAFETY: `ctx` is a valid krun context and `env_ptrs` is a valid
-  //         NUL-terminated pointer array.
-  let rc = unsafe { krun::krun_set_env(ctx, env_ptrs.as_ptr()) };
-  ensure!(rc >= 0, "failed to set environment");
 
   if !command.is_empty() {
     let cmd = CString::new(command[0].as_str())?;
