@@ -533,21 +533,6 @@ fn main() {
   //         require NUL termination.
   let _rc = unsafe { sethostname(hostname.as_bytes().as_ptr().cast(), hostname.len()) };
 
-  // Apply HOME and TERM from KRUN_ prefixed env vars.
-  if let Ok(home) = env::var("KRUN_HOME") {
-    // SAFETY: We are in a single-threaded context.
-    let () = unsafe { env::set_var("HOME", &home) };
-  }
-  if let Ok(term) = env::var("KRUN_TERM") {
-    // SAFETY: We are in a single-threaded context.
-    let () = unsafe { env::set_var("TERM", &term) };
-  }
-
-  // Determine working directory.
-  if let Ok(workdir) = env::var("KRUN_WORKDIR") {
-    let _result = env::set_current_dir(&workdir);
-  }
-
   // Determine the command to run.
   let c_krun_init = env::var_os("KRUN_INIT")
     .map(|s| CString::new(s.into_vec()).expect("KRUN_INIT contains NUL"))
