@@ -16,6 +16,7 @@ use std::ffi::c_char;
 use std::fs;
 use std::fs::File;
 use std::fs::remove_file;
+use std::io;
 use std::io::Seek as _;
 use std::io::Write as _;
 use std::mem::MaybeUninit;
@@ -86,6 +87,58 @@ fn deploy_init_binary(path: &Path) -> Result<CleanupGuard> {
     .with_context(|| format!("failed to write init binary to {}", path.display()))?;
 
   Ok(guard)
+}
+
+
+/// Place the process in a private user namespace mapping the host
+/// uid/gid to 0/0.
+///
+/// libkrun's virtiofs reads file metadata via the kernel's normal stat
+/// path; once we're inside this namespace, file ownership is translated
+/// transparently. Files owned by the invoking user appear as uid/gid 0
+/// (root in the guest); files owned by other host ids appear as the
+/// overflow id (65534, nobody) -- still readable when world-readable.
+///
+/// Writes from the guest happen as guest uid 0; the kernel translates
+/// that back to the host uid via the same mapping, so guest-created
+/// files end up host-owned by the invoking user.
+fn enter_user_namespace() -> Result<()> {
+  // Capture uid/gid BEFORE `unshare`. Afterwards, `getuid`/`getgid`
+  // return the overflow id (65534) until the maps are written.
+  // SAFETY: `getuid` is always safe to call.
+  let uid = unsafe { libc::getuid() };
+  // SAFETY: `getgid` is always safe to call.
+  let gid = unsafe { libc::getgid() };
+
+  // SAFETY: `unshare` is always safe to call.
+  let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
+  ensure!(
+    rc == 0,
+    "unshare(CLONE_NEWUSER) failed: {}; check `kernel.unprivileged_userns_clone` or \
+     `kernel.apparmor_restrict_unprivileged_userns`",
+    io::Error::last_os_error()
+  );
+
+  let write_proc = |path: &str, content: &str| -> Result<()> {
+    // The `proc` map files reject `O_TRUNC`, so `fs::write` is not
+    // usable here; open without truncate.
+    let mut file = fs::OpenOptions::new()
+      .write(true)
+      .open(path)
+      .with_context(|| format!("failed to open `{path}`"))?;
+    let () = file
+      .write_all(content.as_bytes())
+      .with_context(|| format!("failed to write `{path}`"))?;
+    Ok(())
+  };
+
+  // `setgroups=deny` is required before writing `gid_map` for an
+  // unprivileged self-write.
+  let () = write_proc("/proc/self/setgroups", "deny\n")?;
+  let () = write_proc("/proc/self/uid_map", &format!("0 {uid} 1\n"))?;
+  let () = write_proc("/proc/self/gid_map", &format!("0 {gid} 1\n"))?;
+
+  Ok(())
 }
 
 
@@ -452,6 +505,11 @@ fn main() -> Result<()> {
   if let Some(kernel_path) = extracted_kernel {
     let () = unlink_paths.push(kernel_path);
   }
+
+  // Enter a private user namespace mapping the host uid/gid to 0/0.
+  // Then the guest sees the invoking user's files as root-owned without
+  // any host-side mount manipulation.
+  let () = enter_user_namespace()?;
 
   let () = exec_vm(args, &init_path, &unlink_paths)?;
   Ok(())

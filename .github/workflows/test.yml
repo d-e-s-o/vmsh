@@ -54,6 +54,11 @@ jobs:
           shopt -s nullglob
           files=("${{ steps.build.outputs.build-dir }}"/boot/vmlinux-*)
           [[ ${#files[@]} -eq 1 ]] || { echo "expected exactly one vmlinux, got ${files[*]}"; exit 1; }
+
+          # Unrestrict unprivileged user namespaces, which is what our
+          # tests assume.
+          echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
+
           VMSH_KERNEL="${files[0]}" cargo test --workspace --all-features -- --include-ignored
   clippy:
     name: Lint with clippy

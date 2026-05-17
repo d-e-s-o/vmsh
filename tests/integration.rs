@@ -9,6 +9,7 @@ use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
 use std::net::TcpListener;
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::io::FromRawFd as _;
 use std::os::unix::io::OwnedFd;
 use std::os::unix::net::UnixListener;
@@ -353,7 +354,8 @@ fn guest_sees_host_filesystem() {
   );
 }
 
-/// Test that files written by the guest appear on the host.
+/// Test that files written by the guest appear on the host, owned by
+/// the invoking user.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn guest_writes_to_host_filesystem() {
@@ -376,11 +378,81 @@ fn guest_writes_to_host_filesystem() {
     "unexpected exit code; stderr:\n{stderr}",
   );
 
+  let meta = fs::metadata(&file_path).expect("file written by guest should exist on host");
   let host_content =
-    fs::read_to_string(&file_path).expect("file written by guest should exist on host");
+    fs::read_to_string(&file_path).expect("file written by guest should be readable on host");
   assert_eq!(
     host_content, content,
     "host file should contain guest-written content, got: {host_content:?}",
+  );
+  // SAFETY: `getuid` is always safe.
+  let expected_uid = unsafe { libc::getuid() };
+  assert_eq!(
+    meta.uid(),
+    expected_uid,
+    "guest-created file should be host-owned by the invoking user (uid {expected_uid}), \
+     got uid {}",
+    meta.uid(),
+  );
+}
+
+/// Check that the guest process runs as uid 0 / gid 0.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn guest_runs_as_root() {
+  let output = Vm::new().run(&["/usr/bin/id", "-u"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout.trim(), "0", "guest uid should be 0, got: {stdout:?}");
+}
+
+/// Verify that a host file owned by the invoking user appears as
+/// root-owned inside the guest.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn host_owned_file_appears_as_root_in_guest() {
+  let file = NamedTempFile::new().expect("failed to create temp file on host");
+  let path_str = file.path().to_str().unwrap();
+
+  let output = Vm::new().run(&["/usr/bin/stat", "-c", "%u %g", path_str]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "0 0",
+    "host file owned by invoking user should appear as 0 0 in guest, got: {stdout:?}",
+  );
+}
+
+/// Verify that a host file owned by some other uid (e.g. `root` on a
+/// typical system) appears as the overflow uid (65534, `nobody`) in
+/// the guest.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn unmapped_host_file_appears_as_overflow_in_guest() {
+  let output = Vm::new().run(&["/usr/bin/stat", "-c", "%u", "/etc/passwd"]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(
+    stdout.trim(),
+    "65534",
+    "/etc/passwd (owned by host root) should appear as overflow uid 65534 in guest, \
+     got: {stdout:?}",
   );
 }
 
