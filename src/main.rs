@@ -115,7 +115,8 @@ fn enter_user_namespace() -> Result<()> {
   ensure!(
     rc == 0,
     "unshare(CLONE_NEWUSER) failed: {}; check `kernel.unprivileged_userns_clone` or \
-     `kernel.apparmor_restrict_unprivileged_userns`",
+     `kernel.apparmor_restrict_unprivileged_userns`, or rerun with `--no-uid-map` to skip \
+     user-namespace setup",
     io::Error::last_os_error()
   );
 
@@ -335,6 +336,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     command,
     env_vars,
     all_envs,
+    no_uid_map: _,
     verbosity,
   } = args;
 
@@ -506,10 +508,12 @@ fn main() -> Result<()> {
     let () = unlink_paths.push(kernel_path);
   }
 
-  // Enter a private user namespace mapping the host uid/gid to 0/0.
-  // Then the guest sees the invoking user's files as root-owned without
-  // any host-side mount manipulation.
-  let () = enter_user_namespace()?;
+  if !args.no_uid_map {
+    // Enter a private user namespace mapping the host uid/gid to 0/0.
+    // Then the guest sees the invoking user's files as root-owned without
+    // any host-side mount manipulation.
+    let () = enter_user_namespace()?;
+  }
 
   let () = exec_vm(args, &init_path, &unlink_paths)?;
   Ok(())

@@ -66,6 +66,16 @@ pub struct RunArgs {
   /// (`KRUN_*`) are excluded. Individual `--env` flags take precedence.
   #[clap(long)]
   pub all_envs: bool,
+  /// Skip the user-namespace setup that maps the host uid/gid to root
+  /// in the guest.
+  ///
+  /// Escape hatch for systems where unprivileged user namespaces are
+  /// blocked (e.g. Debian/Ubuntu `kernel.unprivileged_userns_clone=0`,
+  /// Ubuntu 24.04 `kernel.apparmor_restrict_unprivileged_userns=1`).
+  /// Without the mapping, host files appear in the guest with their
+  /// original uid/gid, causing some tools to fail ownership checks.
+  #[clap(long, hide = true)]
+  pub no_uid_map: bool,
   /// Increase verbosity (can be supplied multiple times).
   #[clap(short = 'v', long = "verbose", global = true, action = ArgAction::Count)]
   pub verbosity: u8,

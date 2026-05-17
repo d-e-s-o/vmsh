@@ -434,6 +434,33 @@ fn host_owned_file_appears_as_root_in_guest() {
   );
 }
 
+/// Verify that with `--no-uid-map` the user-namespace setup is skipped.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn no_uid_map_keeps_host_uids() {
+  let file = NamedTempFile::new().expect("failed to create temp file on host");
+  let path_str = file.path().to_str().unwrap();
+
+  let output = Vm::new()
+    .arg("--no-uid-map")
+    .run(&["/usr/bin/stat", "-c", "%u", path_str]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "unexpected exit code; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  // SAFETY: `getuid` is always safe to call.
+  let host_uid = unsafe { libc::getuid() };
+  assert_eq!(
+    stdout.trim(),
+    host_uid.to_string(),
+    "with --no-uid-map, host-owned file should appear as host uid ({host_uid}) in the guest, \
+     got: {stdout:?}",
+  );
+}
+
 /// Verify that a host file owned by some other uid (e.g. `root` on a
 /// typical system) appears as the overflow uid (65534, `nobody`) in
 /// the guest.
