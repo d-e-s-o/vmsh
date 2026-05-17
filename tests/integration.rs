@@ -194,7 +194,7 @@ fn stderr_capture() {
     stderr, "err\n",
     "stderr should be 'err\\n', got: {stderr:?}",
   );
-  assert!(stdout.is_empty(), "stdout should be empty, got: {stdout:?}",);
+  assert!(stdout.is_empty(), "stdout should be empty, got: {stdout:?}");
 }
 
 /// Check that `--verbose` emits boot messages on stderr without
@@ -486,7 +486,7 @@ fn interactive_tty_is_console() {
       ptr::null(),
     )
   };
-  assert_eq!(rc, 0, "openpty failed: {}", io::Error::last_os_error(),);
+  assert_eq!(rc, 0, "openpty failed: {}", io::Error::last_os_error());
   // SAFETY: `openpty` succeeded, so both fds are valid and owned.
   let master = unsafe { OwnedFd::from_raw_fd(master) };
   // SAFETY: `openpty` succeeded, so both fds are valid and owned.
