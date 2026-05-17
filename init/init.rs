@@ -449,8 +449,7 @@ fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
     "vmsh-init: couldn't execute '{}': {err}",
     exec_path.to_str().unwrap_or("?")
   );
-  let () = set_exit_code(code);
-  // SAFETY: Exiting the process is always safe at this point.
+  // SAFETY: We are in the child process and exiting it is always safe.
   unsafe { _exit(code) }
 }
 
@@ -468,7 +467,7 @@ fn unlink_temp_files() {
 }
 
 
-fn main() {
+fn main_impl() -> c_int {
   const TSI_WARNING: &str = "vmsh-init: warning: kernel does not support TSI networking; \
    use a TSI-patched kernel or omit --net argument to vmsh";
 
@@ -488,9 +487,7 @@ fn main() {
   // Mount essential filesystems.
   if let Err(err) = mount_filesystems() {
     eprintln!("vmsh-init: failed to mount filesystems: {err}");
-    let () = set_exit_code(125);
-    // SAFETY: Exiting the process is always safe.
-    unsafe { _exit(125) }
+    return 125
   }
 
   // Reopen fds 0, 1, 2 onto `/dev/console`. The kernel opens
@@ -566,9 +563,7 @@ fn main() {
   let child_pid = unsafe { fork() };
   if child_pid < 0 {
     eprintln!("vmsh-init: fork failed");
-    let () = set_exit_code(125);
-    // SAFETY: Exiting the process is always safe.
-    unsafe { _exit(125) };
+    return 125
   }
 
   if child_pid == 0 {
@@ -590,7 +585,7 @@ fn main() {
     }
   }
 
-  let exit_code = if WIFEXITED(status) {
+  let rc = if WIFEXITED(status) {
     WEXITSTATUS(status)
   } else if WIFSIGNALED(status) {
     WTERMSIG(status) + 128
@@ -598,8 +593,13 @@ fn main() {
     125
   };
 
-  let () = set_exit_code(exit_code);
+  rc
+}
 
+fn main() {
+  let rc = main_impl();
+
+  let () = set_exit_code(rc);
   // PID 1 must not exit (kernel panics). Power off the VM:
   // - use `RB_AUTOBOOT` which triggers a reboot
   // - that goes through the `reboot=k` path (i8042 reset)
