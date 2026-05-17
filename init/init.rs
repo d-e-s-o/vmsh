@@ -35,7 +35,6 @@ use std::time::Duration;
 use libc::_exit;
 use libc::AF_INET;
 use libc::EBUSY;
-use libc::ENOENT;
 use libc::IFF_UP;
 use libc::MS_NODEV;
 use libc::MS_NOEXEC;
@@ -436,12 +435,12 @@ fn setup_redirects() {
 
 fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
   // SAFETY: `exec_path` and `exec_argv` are valid NUL-terminated
-  // strings. `exec_argv` is NULL-terminated.
+  //         strings. `exec_argv` is NULL-terminated.
   let _rc = unsafe { execvp(exec_path.as_ptr(), exec_argv.as_ptr()) };
 
   // If exec returns, it failed.
   let err = io::Error::last_os_error();
-  let code = if err.raw_os_error() == Some(ENOENT) {
+  let code = if err.kind() == io::ErrorKind::NotFound {
     127
   } else {
     126
