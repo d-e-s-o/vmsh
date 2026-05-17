@@ -112,13 +112,9 @@ fn enter_user_namespace() -> Result<()> {
 
   // SAFETY: `unshare` is always safe to call.
   let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER) };
-  ensure!(
-    rc == 0,
-    "unshare(CLONE_NEWUSER) failed: {}; check `kernel.unprivileged_userns_clone` or \
-     `kernel.apparmor_restrict_unprivileged_userns`, or rerun with `--no-uid-map` to skip \
-     user-namespace setup",
-    io::Error::last_os_error()
-  );
+  if rc != 0 {
+    return Err(io::Error::last_os_error()).context("failed to enter new user namespace")
+  }
 
   let write_proc = |path: &str, content: &str| -> Result<()> {
     // The `proc` map files reject `O_TRUNC`, so `fs::write` is not
@@ -512,7 +508,25 @@ fn main() -> Result<()> {
     // Enter a private user namespace mapping the host uid/gid to 0/0.
     // Then the guest sees the invoking user's files as root-owned without
     // any host-side mount manipulation.
-    let () = enter_user_namespace()?;
+    let () = enter_user_namespace().map_err(|err| {
+      if err
+        .root_cause()
+        .downcast_ref::<io::Error>()
+        .map(|err| err.kind() == io::ErrorKind::PermissionDenied)
+        .unwrap_or(false)
+      {
+        Result::<(), _>::Err(err)
+          .context(
+            "user namespace setup failed; check \
+            `kernel.unprivileged_userns_clone` or \
+            `kernel.apparmor_restrict_unprivileged_userns`, or rerun \
+            with `--no-uid-map` to skip user-namespace setup",
+          )
+          .unwrap_err()
+      } else {
+        err
+      }
+    })?;
   }
 
   let () = exec_vm(args, &init_path, &unlink_paths)?;
