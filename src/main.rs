@@ -13,15 +13,16 @@ use std::ffi::CString;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::ffi::c_char;
+use std::fs;
 use std::fs::File;
 use std::fs::remove_file;
-use std::fs::write;
 use std::io::Seek as _;
 use std::io::Write as _;
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::io::AsRawFd as _;
 use std::os::unix::io::FromRawFd as _;
 use std::os::unix::io::OwnedFd;
@@ -72,19 +73,18 @@ impl Drop for CleanupGuard {
 /// Write the embedded init binary to the host filesystem (visible in
 /// guest via `virtiofs`).
 fn deploy_init_binary(path: &Path) -> Result<CleanupGuard> {
-  let () = write(path, INIT_BINARY)
-    .with_context(|| format!("failed to write init binary to {}", path.display()))?;
-
+  let mut file = fs::OpenOptions::new()
+    .create_new(true)
+    .mode(0o755)
+    .write(true)
+    .open(path)
+    .with_context(|| format!("failed to create `{}`", path.display()))?;
   let guard = CleanupGuard(Some(path.to_path_buf()));
 
-  let c_path = CString::new(path.as_os_str().as_bytes())?;
-  // SAFETY: `c_path` is a valid NUL-terminated string.
-  let rc = unsafe { libc::chmod(c_path.as_ptr(), 0o755) };
-  ensure!(
-    rc == 0,
-    "failed to `chmod` init binary at `{}`",
-    path.display()
-  );
+  let () = file
+    .write_all(INIT_BINARY)
+    .with_context(|| format!("failed to write init binary to {}", path.display()))?;
+
   Ok(guard)
 }
 
