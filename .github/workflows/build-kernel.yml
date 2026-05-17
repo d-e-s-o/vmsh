@@ -12,7 +12,7 @@ jobs:
       - uses: d-e-s-o/build-linux@a2c2581c6b44879b6070699618be648480a122c5
         with:
           kernel-repo: 'gregkh/linux'
-          rev: 'v6.18.29'
+          rev: 'v6.18.31'
           config: 'var/linux-config-minimal'
           vmlinux: 'true'
           patches: |
