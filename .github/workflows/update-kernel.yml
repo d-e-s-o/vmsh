@@ -58,11 +58,6 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git switch --force-create "${branch}"
-          git commit --all --message "Bump CI kernel to v${NEW}"
+          git commit --all --message "Bump CI kernel to v${NEW}\n\nBump the stable kernel pin from v${OLD} to v${NEW} to get the latest\nand greatest."
           git push --force-with-lease origin "${branch}"
-          gh pr view "${branch}" >/dev/null 2>&1 || \
-            gh pr create \
-              --base "${GITHUB_REF_NAME}" \
-              --head "${branch}" \
-              --title "Bump CI kernel to v${NEW}" \
-              --body "Bump the stable kernel pin from \`v${OLD}\` to \`v${NEW}\` to get the latest and greatest."
+          gh pr create --base "${GITHUB_REF_NAME}" --head "${branch}" --fill
