@@ -13,7 +13,7 @@ runs:
         echo "hash=${hash}" >> "$GITHUB_OUTPUT"
     - name: Restore cached vmsh binary
       id: cache
-      uses: actions/cache/restore@v5
+      uses: actions/cache/restore@v6
       with:
         path: ~/.vmsh/bin
         key: vmsh-${{ steps.source-hash.outputs.hash }}
@@ -30,7 +30,7 @@ runs:
         cp "${{ runner.temp }}/vmsh-target/release/vmsh" ~/.vmsh/bin/
     - name: Save cached vmsh binary
       if: steps.cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v5
+      uses: actions/cache/save@v6
       with:
         path: ~/.vmsh/bin
         key: vmsh-${{ steps.source-hash.outputs.hash }}
