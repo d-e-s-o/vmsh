@@ -532,6 +532,12 @@ fn main_impl() -> c_int {
   //         require NUL termination.
   let _rc = unsafe { sethostname(hostname.as_bytes().as_ptr().cast(), hostname.len()) };
 
+  if let Some(workdir) = env::var_os("WORKDIR") {
+    if let Err(err) = env::set_current_dir(workdir) {
+      eprintln!("vmsh-init: failed to set working directory: {err}");
+    }
+  }
+
   // Determine the command to run.
   let c_krun_init = env::var_os("KRUN_INIT")
     .map(|s| CString::new(s.into_vec()).expect("KRUN_INIT contains NUL"))

@@ -512,11 +512,12 @@ fn unmapped_host_file_appears_as_overflow_in_guest() {
   );
 }
 
-/// Check that the guest's working directory defaults to `/`.
+/// Check that the guest's working directory matches the host cwd.
 #[test]
 #[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
 fn working_directory() {
-  let output = Vm::new().run(&["/bin/pwd"]);
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let output = Vm::new().cwd(dir.path()).run(&["/bin/pwd"]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -524,10 +525,11 @@ fn working_directory() {
     "unexpected exit code; stderr:\n{stderr}",
   );
   let stdout = String::from_utf8_lossy(&output.stdout);
+  let expected = dir.path().to_str().unwrap();
   assert_eq!(
     stdout.trim(),
-    "/",
-    "guest working directory should be /, got: {stdout:?}",
+    expected,
+    "guest working directory should match host cwd, got: {stdout:?}",
   );
 }
 

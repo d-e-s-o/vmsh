@@ -250,6 +250,10 @@ fn set_exec(
   } else {
     c"/root"
   };
+  let cwd = env::current_dir()
+    .and_then(|p| p.canonicalize())
+    .context("failed to determine current directory")?;
+  let cwd = CString::new(format!("WORKDIR={}", cwd.display())).unwrap();
 
   // Determine which of stdin/stdout/stderr are non-terminal.
   // `libkrun` creates virtio console ports for redirected FDs; tell the
@@ -261,7 +265,7 @@ fn set_exec(
   // SAFETY: `isatty` is always safe to call.
   let stderr_redir = unsafe { libc::isatty(libc::STDERR_FILENO) == 0 };
 
-  let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr()];
+  let mut env_ptrs = vec![hostname.as_ptr(), home.as_ptr(), cwd.as_ptr()];
 
   // Tell the guest init which temporary files to unlink. libkrun exits
   // the process hard on VM exit, bypassing host-side RAII cleanup.
