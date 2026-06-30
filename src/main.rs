@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::env;
 use std::env::home_dir;
 use std::env::temp_dir;
+use std::ffi::CStr;
 use std::ffi::CString;
 use std::ffi::OsStr;
 use std::ffi::OsString;
@@ -48,6 +49,13 @@ use crate::args::RunArgs;
 
 /// Embedded init binary.
 const INIT_BINARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/vmsh-init"));
+
+/// The virtiofs tag used by libkrun for the root filesystem device.
+///
+/// Corresponds to `KRUN_FS_ROOT_TAG` in `libkrun.h`.
+const KRUN_FS_ROOT_TAG: &CStr = c"/dev/root";
+// Use the same 512 MiB DAX window that `krun_set_root` uses.
+const KRUN_FS_ROOT_SHM_SIZE: u64 = 1 << 29;
 
 
 /// RAII guard to clean up a temporary file on exit.
@@ -403,9 +411,17 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
 
   let c_rootfs = c"/";
-  // SAFETY: `ctx` is a valid krun context and `c_rootfs` is a valid
-  //         NUL-terminated string.
-  let rc = unsafe { krun::krun_set_root(ctx, c_rootfs.as_ptr()) };
+  // SAFETY: `ctx` is a valid krun context, `KRUN_FS_ROOT_TAG` and
+  //         `c_rootfs` are valid NUL-terminated strings.
+  let rc = unsafe {
+    krun::krun_add_virtiofs3(
+      ctx,
+      KRUN_FS_ROOT_TAG.as_ptr(),
+      c_rootfs.as_ptr(),
+      KRUN_FS_ROOT_SHM_SIZE,
+      false,
+    )
+  };
   ensure!(rc >= 0, "failed to set root filesystem");
 
   // Pass environment variables to the guest via a virtio console port
