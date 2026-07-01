@@ -58,6 +58,50 @@ const KRUN_FS_ROOT_TAG: &CStr = c"/dev/root";
 const KRUN_FS_ROOT_SHM_SIZE: u64 = 1 << 29;
 
 
+/// Set up virtiofs devices for additional shares.
+fn set_shares(ctx: u32, shares: &[PathBuf]) -> Result<()> {
+  for (idx, path) in shares.iter().enumerate() {
+    let tag = format!("vmsh-{idx}\0");
+    // SANITY: We statically ensured a single terminating NUL byte is
+    //         present.
+    let c_tag = CString::from_vec_with_nul(tag.into_bytes()).unwrap();
+    let c_path = CString::new(path.as_os_str().as_bytes())
+      .with_context(|| format!("path `{}` contains NUL bytes", path.display()))?;
+    let read_only = false;
+    // SAFETY: `ctx` is a valid krun context, `c_tag` and `c_path` are
+    //         valid NUL-terminated strings.
+    let rc =
+      unsafe { krun::krun_add_virtiofs3(ctx, c_tag.as_ptr(), c_path.as_ptr(), 0, read_only) };
+    ensure!(
+      rc >= 0,
+      "failed to add virtiofs device for `{}`",
+      path.display()
+    );
+  }
+
+  Ok(())
+}
+
+
+/// Format share metadata as an environment variable value, to be passed
+/// to the init process to be mounted accordingly.
+///
+/// Format: `tag:path:mode[;tag:path:mode]...`
+/// where mode is `rw` or `ro`.
+fn format_shares_env(shares: &[PathBuf]) -> Vec<u8> {
+  let mut out = Vec::new();
+  for (idx, path) in shares.iter().enumerate() {
+    if !out.is_empty() {
+      let () = out.push(b';');
+    }
+    let () = out.extend_from_slice(format!("vmsh-{idx}").as_bytes());
+    let () = out.push(b':');
+    let () = out.extend_from_slice(path.as_os_str().as_bytes());
+  }
+  out
+}
+
+
 /// RAII guard to clean up a temporary file on exit.
 struct CleanupGuard(Option<PathBuf>);
 
@@ -246,6 +290,7 @@ fn set_exec(
   command: Vec<String>,
   has_env_port: bool,
   unlink_paths: &[&Path],
+  shares_env: Option<&[u8]>,
 ) -> Result<()> {
   // Provide defaults for some relevant variables, but these will be
   // overwritten by any user provided values.
@@ -306,6 +351,15 @@ fn set_exec(
   if stderr_redir {
     let () = env_ptrs.push(c"VMSH_STDERR=1".as_ptr());
   }
+
+  let shares_env_cstr;
+  if let Some(val) = shares_env {
+    let mut buf = b"VMSH_SHARES=".to_vec();
+    let () = buf.extend_from_slice(val);
+    shares_env_cstr = CString::new(buf)?;
+    let () = env_ptrs.push(shares_env_cstr.as_ptr());
+  }
+
   let () = env_ptrs.push(ptr::null());
 
   if !command.is_empty() {
@@ -346,6 +400,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     all_envs,
     no_uid_map: _,
     verbosity,
+    share_rw,
   } = args;
 
   // SANITY: Caller guarantees that a kernel is always set.
@@ -409,6 +464,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   ensure!(rc >= 0, "failed to add vsock device");
 
   let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
+  let () = set_shares(ctx, &share_rw)?;
 
   let c_rootfs = c"/";
   // SAFETY: `ctx` is a valid krun context, `KRUN_FS_ROOT_TAG` and
@@ -451,7 +507,16 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
     };
     ensure!(rc >= 0, "failed to add env console port");
   }
-  let () = set_exec(ctx, command, has_env_port, unlink_paths)?;
+
+  // Build share metadata for the guest init.
+  let shares_env_val = format_shares_env(&share_rw);
+  let shares_env = if shares_env_val.is_empty() {
+    None
+  } else {
+    Some(shares_env_val.as_slice())
+  };
+
+  let () = set_exec(ctx, command, has_env_port, unlink_paths, shares_env)?;
 
   let rc = krun::krun_start_enter(ctx);
   ensure!(rc >= 0, "failed to start VM (code {rc})");
@@ -662,5 +727,26 @@ mod tests {
     let text = String::from_utf8(content).unwrap();
     let count = text.matches("PATH=").count();
     assert_eq!(count, 1);
+  }
+
+  /// Verify the `VMSH_SHARES` env var format.
+  #[test]
+  fn share_metadata_format() {
+    let shares = [
+      PathBuf::from("/home/user/project"),
+      PathBuf::from("/tmp"),
+      PathBuf::from("/opt"),
+    ];
+    let env = format_shares_env(&shares);
+    assert_eq!(env, b"vmsh-0:/home/user/project;vmsh-1:/tmp;vmsh-2:/opt");
+  }
+
+  /// Check that non-UTF-8 path bytes survive the share encoding round-trip.
+  #[test]
+  fn non_utf8_paths() {
+    // 0x80 is not valid UTF-8 on its own.
+    let rw_path = PathBuf::from(OsString::from_vec(b"/rw-\x80".to_vec()));
+    let env = format_shares_env(&[rw_path]);
+    assert_eq!(env, b"vmsh-0:/rw-\x80");
   }
 }

@@ -4,6 +4,7 @@ use std::collections::HashSet;
 use std::env;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::ffi::c_char;
 use std::ffi::c_int;
@@ -454,6 +455,59 @@ fn do_exec(exec_path: &CStr, exec_argv: &[*const c_char]) -> ! {
 }
 
 
+/// Mount virtiofs shares specified in `VMSH_SHARES`.
+///
+/// Format: `tag:path[;tag:path]...`.
+///
+/// Each entry is mounted at the specified path. Parent directories are
+/// created if needed.
+fn mount_shares() {
+  let spec = match env::var_os("VMSH_SHARES") {
+    Some(s) if !s.is_empty() => s,
+    _ => return,
+  };
+
+  for entry in spec.as_bytes().split(|&b| b == b';') {
+    // Parse `tag:path`.
+    let mut parts = entry.splitn(2, |&b| b == b':');
+    let tag = match parts.next() {
+      Some(t) if !t.is_empty() => t,
+      _ => {
+        eprintln!(
+          "vmsh-init: warning: malformed share entry: {}",
+          String::from_utf8_lossy(entry)
+        );
+        continue;
+      },
+    };
+    let path_bytes = match parts.next() {
+      Some(p) if !p.is_empty() => p,
+      _ => {
+        eprintln!(
+          "vmsh-init: warning: malformed share entry: {}",
+          String::from_utf8_lossy(entry)
+        );
+        continue;
+      },
+    };
+
+    let path = Path::new(OsStr::from_bytes(path_bytes));
+    let () = DirBuilder::new()
+      .mode(0o755)
+      .recursive(true)
+      .create(path)
+      .unwrap_or_else(|e| eprintln!("vmsh-init: warning: mkdir {}: {e}", path.display()));
+
+    // SANITY: We have control over the calling code and it won't ever
+    //         include NUL bytes in `VMSH_SHARES`.
+    let c_tag = CString::new(tag).unwrap();
+    let c_path = CString::new(path_bytes).unwrap();
+
+    let () = mount_or_warn(Some(&c_tag), &c_path, Some(c"virtiofs"), 0, "virtiofs");
+  }
+}
+
+
 /// Delete colon-separated paths listed in `VMSH_UNLINK`.
 fn unlink_temp_files() {
   let list = match env::var("VMSH_UNLINK") {
@@ -524,6 +578,7 @@ fn main_impl() -> c_int {
 
   // Bring up loopback interface.
   let () = bring_up_loopback();
+  let () = mount_shares();
   let () = load_env_vars();
 
   // Set hostname.
