@@ -525,10 +525,6 @@ fn main_impl() -> c_int {
   const TSI_WARNING: &str = "vmsh-init: warning: kernel does not support TSI networking; \
    use a TSI-patched kernel or omit --net argument to vmsh";
 
-  // Remove temporary files early -- the host code won't get a chance
-  // because libkrun exits the process hard on VM exit.
-  let () = unlink_temp_files();
-
   // Set up shared mount propagation on root.
   let () = mount_or_warn(
     None,
@@ -579,6 +575,10 @@ fn main_impl() -> c_int {
   // Bring up loopback interface.
   let () = bring_up_loopback();
   let () = mount_shares();
+  // Remove temporary files now that rw shares are mounted. The host
+  // code won't get a chance because libkrun exits the process hard on
+  // VM exit.
+  let () = unlink_temp_files();
   let () = load_env_vars();
 
   // Set hostname.

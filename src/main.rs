@@ -58,6 +58,36 @@ const KRUN_FS_ROOT_TAG: &CStr = c"/dev/root";
 const KRUN_FS_ROOT_SHM_SIZE: u64 = 1 << 29;
 
 
+/// Compute the final list of filesystem shares and a flag indicating
+/// whether the root filesystem should be mounted read-only or not.
+///
+/// Unless overwritten, the current directory as well as `/tmp/` will be
+/// read-writable by default.
+///
+/// Returns the final list of share paths and whether the root should be
+/// read-only (`false` only if `--share-rw /` was given).
+fn compute_shares(cwd: &Path, mut share_rw: Vec<PathBuf>) -> (Vec<PathBuf>, bool) {
+  // The root path is always handled via the root virtiofs device, so
+  // remove it from the per-share list and derive the read-only flag
+  // from the action.
+  let root = Path::new("/");
+  let mut root_ro = true;
+  let () = share_rw.retain(|p| {
+    let retain = p != root;
+    if !retain {
+      root_ro = false;
+    }
+    retain
+  });
+
+  // By default we mount at least cwd and `/tmp/` writable.
+  let defaults = [cwd.to_path_buf(), temp_dir()];
+  let () = share_rw.extend(defaults);
+
+  (share_rw, root_ro)
+}
+
+
 /// Set up virtiofs devices for additional shares.
 fn set_shares(ctx: u32, shares: &[PathBuf]) -> Result<()> {
   for (idx, path) in shares.iter().enumerate() {
@@ -464,7 +494,14 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   ensure!(rc >= 0, "failed to add vsock device");
 
   let () = set_kernel(ctx, kernel, init_guest_path, verbosity)?;
-  let () = set_shares(ctx, &share_rw)?;
+
+  // Compute filesystem shares. By default, the root is read-only with
+  // the cwd and `/tmp/` shared read-write. User flags override this.
+  let cwd = env::current_dir()
+    .and_then(|p| p.canonicalize())
+    .context("failed to determine current directory")?;
+  let (shares, root_ro) = compute_shares(&cwd, share_rw);
+  let () = set_shares(ctx, &shares)?;
 
   let c_rootfs = c"/";
   // SAFETY: `ctx` is a valid krun context, `KRUN_FS_ROOT_TAG` and
@@ -475,7 +512,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
       KRUN_FS_ROOT_TAG.as_ptr(),
       c_rootfs.as_ptr(),
       KRUN_FS_ROOT_SHM_SIZE,
-      false,
+      root_ro,
     )
   };
   ensure!(rc >= 0, "failed to set root filesystem");
@@ -509,7 +546,7 @@ fn exec_vm(args: RunArgs, init_guest_path: &Path, unlink_paths: &[&Path]) -> Res
   }
 
   // Build share metadata for the guest init.
-  let shares_env_val = format_shares_env(&share_rw);
+  let shares_env_val = format_shares_env(&shares);
   let shares_env = if shares_env_val.is_empty() {
     None
   } else {

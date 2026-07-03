@@ -1,11 +1,14 @@
 //! Integration tests for `vmsh`.
 
 use std::borrow::Cow;
+use std::convert::identity;
 use std::env;
 use std::env::current_dir;
 use std::env::home_dir;
+use std::env::temp_dir;
 use std::fs;
 use std::fs::File;
+use std::fs::remove_file;
 use std::io;
 use std::io::Read as _;
 use std::io::Write as _;
@@ -394,7 +397,8 @@ fn guest_writes_to_host_filesystem() {
   let file_path_str = file_path.to_str().unwrap();
   let content = "written_by_guest";
 
-  let output = Vm::new().run(&[
+  let share_arg = format!("--share-rw={}", dir.path().display());
+  let output = Vm::new().arg(&share_arg).run(&[
     "/bin/sh",
     "-c",
     &format!("echo -n {content} > {file_path_str}"),
@@ -1001,8 +1005,11 @@ fn uds_connection() {
      s.connect('{sock_path_str}'); s.send(b'vmsh-uds-test'); s.close()"
   );
 
+  let share_arg = format!("--share-rw={}", dir.path().display());
   // Without --uds, UDS connect should fail.
-  let output = Vm::new().run(&["/usr/bin/python3", "-c", &py]);
+  let output = Vm::new()
+    .arg(&share_arg)
+    .run(&["/usr/bin/python3", "-c", &py]);
   assert_ne!(
     output.status.code(),
     Some(0),
@@ -1017,7 +1024,10 @@ fn uds_connection() {
     String::from_utf8_lossy(&buf[..n]).to_string()
   });
 
-  let output = Vm::new().arg("--uds").run(&["/usr/bin/python3", "-c", &py]);
+  let output = Vm::new()
+    .arg("--uds")
+    .arg(&share_arg)
+    .run(&["/usr/bin/python3", "-c", &py]);
   let stderr = String::from_utf8_lossy(&output.stderr);
   assert_eq!(
     output.status.code(),
@@ -1212,4 +1222,90 @@ fn no_kernel_no_embed_errors() {
     stderr.contains("no kernel specified") || stderr.contains("no embedded kernel"),
     "error should mention missing kernel, got: {stderr:?}",
   );
+}
+
+/// Verify that the root filesystem is read-only by default.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn default_ro_root() {
+  // We use the user's home directory because it would likely be
+  // writable if it were not for our write-protection.
+  let marker = home_dir()
+    .unwrap()
+    .join(format!("vmsh-tmp-test-{}", process::id()));
+  let output = Vm::new().run(&["/bin/sh", "-c", &format!("touch {}", marker.display())]);
+  assert_ne!(
+    output.status.code(),
+    Some(0),
+    "touch should fail on read-only root; stdout:\n{}",
+    String::from_utf8_lossy(&output.stdout),
+  );
+}
+
+fn check_writable<F>(vm_mod: F, path: &Path)
+where
+  F: Fn(Vm) -> Vm,
+{
+  let output = vm_mod(Vm::new()).run(&[
+    "/bin/sh",
+    "-c",
+    &format!(
+      "echo -n ok > {target} && cat {target}",
+      target = path.display()
+    ),
+  ]);
+  let stderr = String::from_utf8_lossy(&output.stderr);
+  assert_eq!(
+    output.status.code(),
+    Some(0),
+    "writing to cwd should succeed; stderr:\n{stderr}",
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert_eq!(stdout, "ok", "cwd file should be writable, got: {stdout:?}");
+
+  // Verify the file appeared on the host.
+  let host_content = fs::read_to_string(path).expect("file written by guest should exist on host");
+  assert_eq!(host_content, "ok");
+
+  let () = remove_file(path).unwrap();
+}
+
+/// Verify that the current working directory is writable by default.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn default_cwd_writable() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let cwd = dir.path();
+  let marker = cwd.join("test-cwd-file");
+  let () = check_writable(|vm| vm.cwd(cwd), &marker);
+}
+
+/// Verify that `/tmp` is writable by default.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn default_tmp_writable() {
+  let marker = temp_dir().join(format!("vmsh-tmp-test-{}", process::id()));
+  let () = check_writable(identity, &marker);
+}
+
+/// Verify that `--share-rw` makes a path writable.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn share_rw_makes_path_writable() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let dir = dir.path();
+  let marker = dir.join("test-share-rw");
+  let () = check_writable(
+    |vm| vm.arg(&format!("--share-rw={}", dir.display())),
+    &marker,
+  );
+}
+
+/// Verify that `--share-rw /` restores full read-write access.
+#[test]
+#[ignore = "requires /dev/kvm present and VMSH_KERNEL set"]
+fn share_rw_root_full_access() {
+  let dir = TempDir::new().expect("failed to create temp dir on host");
+  let marker = dir.path().join("test-share-rw-root");
+  let () = check_writable(|vm| vm.arg("--share-rw=/"), &marker);
 }
