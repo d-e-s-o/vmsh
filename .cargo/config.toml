@@ -1,9 +1,0 @@
-[env]
-# libkrun requires this variable set or it will attempt build an init
-# binary and fail. Note that we use our own init binary, so it doesn't
-# really matter what we point the crate to.
-# TODO: Setting this variable isn't really a long-term solution. This
-#       file likely won't be honored if contained in a published crate
-#       and so requiring this hack effectively means we cannot publish a
-#       buildable binary.
-KRUN_INIT_BINARY_PATH = { value = "Cargo.toml", force = true, relative = true }

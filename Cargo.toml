@@ -68,7 +68,7 @@ grev = { version = "0.1.3" }
 anyhow = { version = "1" }
 clap = { version = "4", features = ["derive"] }
 libc = { version = "0.2" }
-libkrun = { version = "1.18" }
+libkrun = { version = "1.19", default-features = false }
 # Explicitly pin the otherwise transitive `vm-memory` dependency, to fix
 # version resolution otherwise resulting in broken build.
 _vm-memory_unused = { package = "vm-memory", version = "=0.17.1" }
