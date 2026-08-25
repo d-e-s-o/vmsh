@@ -3,6 +3,10 @@
 mod args;
 mod embed;
 
+#[expect(dead_code)]
+#[path = "../init/init.rs"]
+mod ignore_only_used_for_linting;
+
 use std::cell::LazyCell;
 use std::collections::BTreeMap;
 use std::collections::HashMap;

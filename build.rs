@@ -2,6 +2,10 @@
 
 use std::env;
 use std::fs;
+use std::fs::copy;
+use std::fs::create_dir_all;
+use std::fs::read_dir;
+use std::fs::rename;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,13 +13,40 @@ use std::process::Command;
 use grev::git_revision_auto;
 
 
+fn copy_dir(src: &Path, dst: &Path) {
+  let () =
+    create_dir_all(dst).unwrap_or_else(|e| panic!("failed to create `{}`: {e}", dst.display()));
+
+  for entry in read_dir(src).unwrap() {
+    let entry = entry.unwrap();
+    let src_path = entry.path();
+    let dst_path = dst.join(entry.file_name());
+
+    if src_path.is_dir() {
+      copy_dir(&src_path, &dst_path);
+    } else {
+      copy(&src_path, &dst_path).unwrap_or_else(|e| {
+        panic!(
+          "failed to copy `{}` to `{}`: {e}",
+          src_path.display(),
+          dst_path.display()
+        )
+      });
+    }
+  }
+}
+
 fn build_init(manifest_dir: &Path) {
-  let init_dir = manifest_dir.join("init");
+  let init_dir_src = manifest_dir.join("init");
 
   let out_dir = env::var("OUT_DIR").expect("failed to read `OUT_DIR` variable");
   let out_dir = PathBuf::from(out_dir);
   let init_target_dir = out_dir.join("init-target");
+  let init_dir = out_dir.join("init");
   let init_bin = out_dir.join("vmsh-init");
+
+  let () = copy_dir(&init_dir_src, &init_dir);
+  let () = rename(init_dir.join("Cargo__.toml"), init_dir.join("Cargo.toml")).unwrap();
 
   let debug = env::var("DEBUG").expect("failed to read `DEBUG` variable");
   let (profile, target_dir) = match debug.as_ref() {
@@ -28,16 +59,8 @@ fn build_init(manifest_dir: &Path) {
   let build_dir_cfg = format!("build.build-dir='{}'", init_target_dir.display());
 
   let cargo = env::var("CARGO").expect("`CARGO` variable not present");
-  // TODO: Once we publish the crate we need to figure out how to rely
-  //       on a crates.io released `vmsh-init` instead.
   let output = Command::new(&cargo)
-    .args([
-      "build",
-      "--bin=vmsh-init",
-      "--profile",
-      profile,
-      "--target-dir",
-    ])
+    .args(["build", "--profile", profile, "--target-dir"])
     .arg(&init_target_dir)
     // NB: We explicitly set the `build.build-dir` configuration here,
     //     because without it a recursive `cargo build` may deadlock
@@ -63,7 +86,7 @@ fn build_init(manifest_dir: &Path) {
     fs::copy(&built, &init_bin).unwrap_or_else(|e| panic!("failed to copy init binary: {e}"));
 
   println!("cargo:rerun-if-changed=init/init.rs");
-  println!("cargo:rerun-if-changed=init/Cargo.toml");
+  println!("cargo:rerun-if-changed=init/Cargo__.toml");
 }
 
 fn determine_version(manifest_dir: &Path) {

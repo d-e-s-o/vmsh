@@ -1,0 +1,28 @@
+# Note: Due to lack of artifact-dependency support
+#       (https://github.com/rust-lang/cargo/issues/9096) on stable, this
+#       file is not called `Cargo.toml` (which would make the entire
+#       init/ directory ineligible to be packaged with the main binary).
+#       Rather, this package is not part of the formal workspace but
+#       gets built as part of the main package's build script, after the
+#       manifest got renamed. This hackery enables proper publishing of
+#       the main crate.
+
+[package]
+name = "vmsh-init"
+version = "0.0.0"
+edition = "2024"
+
+[[bin]]
+name = "vmsh-init"
+path = "init.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+incremental = false
+panic = "abort"
+strip = true
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
