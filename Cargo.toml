@@ -35,14 +35,29 @@ wildcard-imports = "warn"
 
 [package]
 name = "vmsh"
-version = "0.0.0"
+version = "0.1.0"
 edition = "2024"
 authors = ["Daniel Mueller <deso@posteo.net>"]
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/d-e-s-o/vmsh.git"
+readme = "README.md"
+categories = [
+  "command-line-utilities",
+  "development-tools",
+  "os::linux-apis",
+  "virtualization",
+]
+keywords = [
+  "cli",
+  "linux",
+  "utility",
+  "security",
+  "virtualization",
+]
 description = """
 Transparently run a shell (or other binary) in a VM.
 """
+include = ["src/**/*", "LICENSE-*", "README.md", "init/**/*", "build.rs"]
 
 [profile.release]
 opt-level = "z"
