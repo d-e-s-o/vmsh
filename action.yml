@@ -40,3 +40,6 @@ runs:
     - name: Enable KVM access
       shell: bash
       run: sudo chmod 666 /dev/kvm
+    - name: Enable unprivileged user namespaces
+      shell: bash
+      run: echo 0 | sudo tee /proc/sys/kernel/apparmor_restrict_unprivileged_userns
