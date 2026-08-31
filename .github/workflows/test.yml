@@ -40,7 +40,7 @@ jobs:
         id: build
         with:
           kernel-repo: 'gregkh/linux'
-          rev: 'v6.18.46'
+          rev: 'v6.18.48'
           config: 'var/linux-config-minimal'
           vmlinux: 'true'
           patches: |
