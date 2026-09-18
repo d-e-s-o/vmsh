@@ -10,7 +10,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 
-use grev::git_revision_auto;
+use grev::git_revision;
 
 
 fn copy_dir(src: &Path, dst: &Path) {
@@ -92,7 +92,7 @@ fn build_init(manifest_dir: &Path) {
 fn determine_version(manifest_dir: &Path) {
   let pkg_version = env::var("CARGO_PKG_VERSION").expect("`CARGO_PKG_VERSION` variable not set");
 
-  let git_rev = git_revision_auto(manifest_dir).expect("failed to determine Git revision");
+  let git_rev = git_revision(manifest_dir).expect("failed to query Git revision");
   if let Some(git_rev) = git_rev {
     println!("cargo:rustc-env=VERSION={pkg_version} ({git_rev})");
   } else {
