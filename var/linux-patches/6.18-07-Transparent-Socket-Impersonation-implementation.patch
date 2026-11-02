@@ -1,4 +1,4 @@
-From 27f72c7cb8303bf850bfccf97ccb5f8a83aba2d4 Mon Sep 17 00:00:00 2001
+From 94748e7ec645abffab6cc5d22eaba8759d014ae6 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Daniel=20M=C3=BCller?= <deso@posteo.net>
 Date: Mon, 6 Apr 2026 13:39:17 -0700
 Subject: [PATCH 7/8] Transparent Socket Impersonation implementation
@@ -23,21 +23,21 @@ check for local UDP listeners before proxying through vsock.
  net/socket.c                        |    3 +
  net/tsi/Kconfig                     |    7 +
  net/tsi/Makefile                    |    4 +
- net/tsi/af_tsi.c                    | 1571 +++++++++++++++++++++++++++
+ net/tsi/af_tsi.c                    | 1572 +++++++++++++++++++++++++++
  net/tsi/af_tsi.h                    |  107 ++
  security/selinux/hooks.c            |    8 +-
  security/selinux/include/classmap.h |    3 +-
- 10 files changed, 1710 insertions(+), 3 deletions(-)
+ 10 files changed, 1711 insertions(+), 3 deletions(-)
  create mode 100644 net/tsi/Kconfig
  create mode 100644 net/tsi/Makefile
  create mode 100644 net/tsi/af_tsi.c
  create mode 100644 net/tsi/af_tsi.h
 
 diff --git a/include/linux/socket.h b/include/linux/socket.h
-index 3b2624..33d65c9 100644
+index 7b1a01b..a843479 100644
 --- a/include/linux/socket.h
 +++ b/include/linux/socket.h
-@@ -240,8 +240,11 @@ struct ucred {
+@@ -257,8 +257,11 @@ struct ucred {
  #define AF_MCTP		45	/* Management component
  				 * transport protocol
  				 */
@@ -50,7 +50,7 @@ index 3b2624..33d65c9 100644
  
  /* Protocol families, same as address families. */
  #define PF_UNSPEC	AF_UNSPEC
-@@ -292,6 +295,9 @@ struct ucred {
+@@ -309,6 +312,9 @@ struct ucred {
  #define PF_SMC		AF_SMC
  #define PF_XDP		AF_XDP
  #define PF_MCTP		AF_MCTP
@@ -82,7 +82,7 @@ index 90e3d72..0ca0d73 100644
  obj-$(CONFIG_NET_SHAPER)	+= shaper/
 +obj-$(CONFIG_TSI)		+= tsi/
 diff --git a/net/socket.c b/net/socket.c
-index e8892b..597d65 100644
+index 7da4058..87f58f6f 100644
 --- a/net/socket.c
 +++ b/net/socket.c
 @@ -219,6 +219,9 @@ static const char * const pf_family_names[] = {
@@ -120,15 +120,15 @@ index 00000000..8b3cf7
 +tsi-y := af_tsi.o
 diff --git a/net/tsi/af_tsi.c b/net/tsi/af_tsi.c
 new file mode 100644
-index 00000000..e266f96
+index 00000000..10b1053
 --- /dev/null
 +++ b/net/tsi/af_tsi.c
-@@ -0,0 +1,1571 @@
+@@ -0,0 +1,1572 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Transparent Socket Impersonation Driver
 + *
-+ * Copyright (C) 2022 Red Hat, Inc.
++ * Copyright (C) 2022-2026 Red Hat, Inc.
 + *
 + * Authors:
 + *  Sergio Lopez <slp@redhat.com>
@@ -208,7 +208,7 @@ index 00000000..e266f96
 +	vm_addr.svm_port = VMADDR_PORT_ANY;
 +	vm_addr.svm_cid = VMADDR_CID_ANY;
 +
-+	err = kernel_bind(*csocket, (struct sockaddr *)&vm_addr,
++	err = kernel_bind(*csocket, (struct sockaddr_unsized *)&vm_addr,
 +			  sizeof(struct sockaddr_vm));
 +	if (err) {
 +		pr_debug("%s: error binding port\n", __func__);
@@ -317,7 +317,8 @@ index 00000000..e266f96
 +	return 0;
 +}
 +
-+static int tsi_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
++static int tsi_bind(struct socket *sock, struct sockaddr_unsized *addr,
++		    int addr_len)
 +{
 +	struct sock *sk = sock->sk;
 +	struct tsi_sock *tsk;
@@ -363,7 +364,7 @@ index 00000000..e266f96
 +	addr_vsock.svm_cid = VMADDR_CID_ANY;
 +	addr_vsock.svm_port = VMADDR_PORT_ANY;
 +
-+	err = vsocket->ops->bind(vsocket, (struct sockaddr *)&addr_vsock,
++	err = vsocket->ops->bind(vsocket, (struct sockaddr_unsized *)&addr_vsock,
 +				 sizeof(addr_vsock));
 +	if (err) {
 +		pr_debug("%s: error setting up vsock listener: %d\n", __func__,
@@ -394,7 +395,7 @@ index 00000000..e266f96
 +	vm_addr.svm_port = VMADDR_PORT_ANY;
 +	vm_addr.svm_cid = VMADDR_CID_ANY;
 +
-+	err = kernel_bind(vsocket, (struct sockaddr *)&vm_addr,
++	err = kernel_bind(vsocket, (struct sockaddr_unsized *)&vm_addr,
 +			  sizeof(struct sockaddr_vm));
 +	if (err) {
 +		pr_debug("%s: error binding port: %d\n", __func__, err);
@@ -1809,10 +1810,10 @@ index 00000000..b74966f
 +
 +#endif
 diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
-index e71329..1bbfd50 100644
+index 03ecfc..4c06041 100644
 --- a/security/selinux/hooks.c
 +++ b/security/selinux/hooks.c
-@@ -1311,7 +1311,13 @@ static inline u16 socket_type_to_security_class(int family, int type, int protoc
+@@ -1318,7 +1318,13 @@ static inline u16 socket_type_to_security_class(int family, int type, int protoc
  			return SECCLASS_XDP_SOCKET;
  		case PF_MCTP:
  			return SECCLASS_MCTP_SOCKET;
@@ -1849,5 +1850,5 @@ index 5665aa..7aa998d 100644
  #endif
  #endif
 -- 
-2.53.0
+2.56.0
 
