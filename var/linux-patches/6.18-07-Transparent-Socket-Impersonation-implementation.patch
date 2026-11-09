@@ -1,4 +1,4 @@
-From 94748e7ec645abffab6cc5d22eaba8759d014ae6 Mon Sep 17 00:00:00 2001
+From 14b894e0038a31f3c3e8359559b101db3c9a9629 Mon Sep 17 00:00:00 2001
 From: =?UTF-8?q?Daniel=20M=C3=BCller?= <deso@posteo.net>
 Date: Mon, 6 Apr 2026 13:39:17 -0700
 Subject: [PATCH 7/8] Transparent Socket Impersonation implementation
@@ -12,10 +12,6 @@ guest socket operations without requiring a virtual network interface.
 The implementation includes smart routing logic: stream sockets attempt
 inet connection first and fall back to vsock proxying; datagram sockets
 check for local UDP listeners before proxying through vsock.
-
-[Rebased from libkrunfw patch 0009 (kernel 6.12.76) onto v6.18.
- Resolved conflicts in net/Makefile (NET_SHAPER added upstream) and
- security/selinux/include/classmap.h (PF_MAX guard value).]
 ---
  include/linux/socket.h              |    8 +-
  net/Kconfig                         |    1 +
@@ -23,21 +19,21 @@ check for local UDP listeners before proxying through vsock.
  net/socket.c                        |    3 +
  net/tsi/Kconfig                     |    7 +
  net/tsi/Makefile                    |    4 +
- net/tsi/af_tsi.c                    | 1572 +++++++++++++++++++++++++++
+ net/tsi/af_tsi.c                    | 1571 +++++++++++++++++++++++++++
  net/tsi/af_tsi.h                    |  107 ++
  security/selinux/hooks.c            |    8 +-
  security/selinux/include/classmap.h |    3 +-
- 10 files changed, 1711 insertions(+), 3 deletions(-)
+ 10 files changed, 1710 insertions(+), 3 deletions(-)
  create mode 100644 net/tsi/Kconfig
  create mode 100644 net/tsi/Makefile
  create mode 100644 net/tsi/af_tsi.c
  create mode 100644 net/tsi/af_tsi.h
 
 diff --git a/include/linux/socket.h b/include/linux/socket.h
-index 7b1a01b..a843479 100644
+index 3b2624..33d65c9 100644
 --- a/include/linux/socket.h
 +++ b/include/linux/socket.h
-@@ -257,8 +257,11 @@ struct ucred {
+@@ -240,8 +240,11 @@ struct ucred {
  #define AF_MCTP		45	/* Management component
  				 * transport protocol
  				 */
@@ -50,7 +46,7 @@ index 7b1a01b..a843479 100644
  
  /* Protocol families, same as address families. */
  #define PF_UNSPEC	AF_UNSPEC
-@@ -309,6 +312,9 @@ struct ucred {
+@@ -292,6 +295,9 @@ struct ucred {
  #define PF_SMC		AF_SMC
  #define PF_XDP		AF_XDP
  #define PF_MCTP		AF_MCTP
@@ -82,7 +78,7 @@ index 90e3d72..0ca0d73 100644
  obj-$(CONFIG_NET_SHAPER)	+= shaper/
 +obj-$(CONFIG_TSI)		+= tsi/
 diff --git a/net/socket.c b/net/socket.c
-index 7da4058..87f58f6f 100644
+index 4ce6ddd..1ceffa 100644
 --- a/net/socket.c
 +++ b/net/socket.c
 @@ -219,6 +219,9 @@ static const char * const pf_family_names[] = {
@@ -120,10 +116,10 @@ index 00000000..8b3cf7
 +tsi-y := af_tsi.o
 diff --git a/net/tsi/af_tsi.c b/net/tsi/af_tsi.c
 new file mode 100644
-index 00000000..10b1053
+index 00000000..60d9837
 --- /dev/null
 +++ b/net/tsi/af_tsi.c
-@@ -0,0 +1,1572 @@
+@@ -0,0 +1,1571 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +/*
 + * Transparent Socket Impersonation Driver
@@ -208,7 +204,7 @@ index 00000000..10b1053
 +	vm_addr.svm_port = VMADDR_PORT_ANY;
 +	vm_addr.svm_cid = VMADDR_CID_ANY;
 +
-+	err = kernel_bind(*csocket, (struct sockaddr_unsized *)&vm_addr,
++	err = kernel_bind(*csocket, (struct sockaddr *)&vm_addr,
 +			  sizeof(struct sockaddr_vm));
 +	if (err) {
 +		pr_debug("%s: error binding port\n", __func__);
@@ -317,8 +313,7 @@ index 00000000..10b1053
 +	return 0;
 +}
 +
-+static int tsi_bind(struct socket *sock, struct sockaddr_unsized *addr,
-+		    int addr_len)
++static int tsi_bind(struct socket *sock, struct sockaddr *addr, int addr_len)
 +{
 +	struct sock *sk = sock->sk;
 +	struct tsi_sock *tsk;
@@ -364,7 +359,7 @@ index 00000000..10b1053
 +	addr_vsock.svm_cid = VMADDR_CID_ANY;
 +	addr_vsock.svm_port = VMADDR_PORT_ANY;
 +
-+	err = vsocket->ops->bind(vsocket, (struct sockaddr_unsized *)&addr_vsock,
++	err = vsocket->ops->bind(vsocket, (struct sockaddr *)&addr_vsock,
 +				 sizeof(addr_vsock));
 +	if (err) {
 +		pr_debug("%s: error setting up vsock listener: %d\n", __func__,
@@ -395,7 +390,7 @@ index 00000000..10b1053
 +	vm_addr.svm_port = VMADDR_PORT_ANY;
 +	vm_addr.svm_cid = VMADDR_CID_ANY;
 +
-+	err = kernel_bind(vsocket, (struct sockaddr_unsized *)&vm_addr,
++	err = kernel_bind(vsocket, (struct sockaddr *)&vm_addr,
 +			  sizeof(struct sockaddr_vm));
 +	if (err) {
 +		pr_debug("%s: error binding port: %d\n", __func__, err);
